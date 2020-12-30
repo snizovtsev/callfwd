@@ -17,8 +17,10 @@ using folly::SocketAddress;
 using Protocol = HTTPServer::Protocol;
 
 DEFINE_int32(http_port, 11000, "Port to listen on with HTTP protocol");
-DEFINE_int32(h2_port, 11001, "Port to listen on with HTTP/2 protocol");
-DEFINE_string(ip, "localhost", "IP/Hostname to bind to");
+DEFINE_string(listen, "localhost", "IP/Hostname to bind to");
+DEFINE_string(listen1, "", "Additional address to bind to");
+DEFINE_string(listen2, "", "Additional address to bind to");
+DEFINE_string(listen3, "", "Additional address to bind to");
 DEFINE_int32(threads,
              0,
              "Number of threads to listen on. Numbers <= 0 "
@@ -31,12 +33,15 @@ std::shared_ptr<PhoneMapping> loadMappingFile(const char* fname)
   std::ifstream in(fname);
   std::string line;
 
+  LOG(INFO) << "Reading database from " << fname << " ...";
+  std::vector<uint64_t> row;
   while (getline(in, line)) {
-    std::vector<uint64_t> row;
     folly::splitTo<uint64_t>(",", line, std::back_inserter(row));
     builder.addMapping(row[0], row[1]);
+    row.clear();
   }
 
+  LOG(INFO) << "Building indexes ...";
   return builder.build();
 }
 
@@ -45,33 +50,39 @@ int main(int argc, char* argv[]) {
   google::InitGoogleLogging(argv[0]);
   google::InstallFailureSignalHandler();
 
+  auto db = loadMappingFile(argv[1]);
+
   std::vector<HTTPServer::IPConfig> IPs = {
-    {SocketAddress(FLAGS_ip, FLAGS_http_port, true), Protocol::HTTP},
-    {SocketAddress(FLAGS_ip, FLAGS_h2_port, true), Protocol::HTTP2},
+    {SocketAddress(FLAGS_listen, FLAGS_http_port, true), Protocol::HTTP},
   };
+  if (!FLAGS_listen1.empty())
+    IPs.push_back({SocketAddress(FLAGS_listen1, FLAGS_http_port, true), Protocol::HTTP});
+  if (!FLAGS_listen2.empty())
+    IPs.push_back({SocketAddress(FLAGS_listen2, FLAGS_http_port, true), Protocol::HTTP});
+  if (!FLAGS_listen3.empty())
+    IPs.push_back({SocketAddress(FLAGS_listen3, FLAGS_http_port, true), Protocol::HTTP});
 
   if (FLAGS_threads <= 0) {
     FLAGS_threads = folly::hardware_concurrency();
     CHECK(FLAGS_threads > 0);
   }
 
-  auto db = loadMappingFile(argv[1]);
-
   HTTPServerOptions options;
   options.threads = static_cast<size_t>(FLAGS_threads);
   options.idleTimeout = std::chrono::milliseconds(60000);
   options.shutdownOn = {SIGINT, SIGTERM};
   options.enableContentCompression = false;
-  options.handlerFactories = RequestHandlerChain()
-    .addThen(std::move(makeApiHandlerFactory(db)))
-    .build();
+  options.h2cEnabled = false;
   // Increase the default flow control to 1MB/10MB
   options.initialReceiveWindow = uint32_t(1 << 20);
   options.receiveStreamWindowSize = uint32_t(1 << 20);
   options.receiveSessionWindowSize = 10 * (1 << 20);
-  options.h2cEnabled = true;
-
+  options.handlerFactories = RequestHandlerChain()
+    .addThen(std::move(makeApiHandlerFactory(db)))
+    .build();
   HTTPServer server(std::move(options));
+
+  LOG(INFO) << "Starting HTTP server on port " << FLAGS_http_port;
   server.bind(IPs);
   server.start();
 
