@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <stdexcept>
+#if HAVE_STD_PARALLEL
+#include <execution>
+#endif
 
 static inline bool operator< (const PhoneList &lhs, const PhoneList &rhs) {
   return std::tie(lhs.phone, lhs.next) < std::tie(rhs.phone, rhs.next);
@@ -59,7 +62,11 @@ std::shared_ptr<PhoneMapping> PhoneMappingBuilder::build()
   for (size_t i = 0; i < N; ++i)
     sortedTargets_[i].next = &sourceNumbers_[i];
 
-  std::sort(sortedTargets_.begin(), sortedTargets_.end());
+#if HAVE_STD_PARALLEL
+  std::stable_sort(std::execution::par_unseq, sortedTargets_.begin(), sortedTargets_.end());
+#else
+  std::stable_sort(sortedTargets_.begin(), sortedTargets_.end());
+#endif
 
   // Wire sourceNumbers_ list by target
   for (size_t i = 0; i + 1 < N; ++i)

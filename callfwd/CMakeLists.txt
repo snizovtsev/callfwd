@@ -7,6 +7,9 @@ set(SOURCES
   )
 
 add_executable(callfwd ${SOURCES})
-target_link_libraries(callfwd proxygen::proxygenhttpserver)
+target_link_libraries(callfwd
+  proxygen::proxygenhttpserver
+  TBB::tbb
+  )
 
 add_subdirectory(test)

@@ -4,4 +4,5 @@ proxygen_add_test(TARGET PhoneMappingTests
     ../PhoneMapping.cpp
   DEPENDS
     testmain
+    TBB::tbb
 )
