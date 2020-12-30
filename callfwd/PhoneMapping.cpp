@@ -54,6 +54,13 @@ PhoneMappingBuilder& PhoneMappingBuilder::addMapping(uint64_t source, uint64_t t
   return *this;
 }
 
+void PhoneMappingBuilder::SizeHint(uint64_t numRecords)
+{
+  sourceNumbers_.reserve(numRecords);
+  sortedTargets_.reserve(numRecords);
+  targetMapping_.reserve(numRecords);
+}
+
 std::shared_ptr<PhoneMapping> PhoneMappingBuilder::build()
 {
   size_t N = sourceNumbers_.size();

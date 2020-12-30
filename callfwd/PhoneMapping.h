@@ -44,6 +44,7 @@ class PhoneMapping : public std::enable_shared_from_this<PhoneMapping> {
 
 class PhoneMappingBuilder : protected PhoneMapping {
  public:
+  void SizeHint(uint64_t numRecords);
   PhoneMappingBuilder& addMapping(uint64_t source, uint64_t target);
   std::shared_ptr<PhoneMapping> build();
 };
