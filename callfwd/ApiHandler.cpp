@@ -1,5 +1,3 @@
-#include "ApiHandler.h"
-
 #include <gflags/gflags.h>
 #include "proxygen/lib/http/HTTPCommonHeaders.h"
 #include "proxygen/lib/http/HTTPMethod.h"

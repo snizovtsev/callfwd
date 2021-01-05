@@ -7,7 +7,6 @@
 #include <folly/system/HardwareConcurrency.h>
 #include <proxygen/httpserver/HTTPServer.h>
 
-#include "ApiHandler.h"
 #include "PhoneMapping.h"
 
 
@@ -27,6 +26,11 @@ DEFINE_int32(threads,
              "Number of threads to listen on. Numbers <= 0 "
              "will use the number of cores on this machine.");
 
+std::unique_ptr<RequestHandlerFactory>
+makeApiHandlerFactory(std::shared_ptr<PhoneMapping> db);
+
+std::unique_ptr<RequestHandlerFactory>
+makeSipHandlerFactory(std::shared_ptr<PhoneMapping> db);
 
 std::shared_ptr<PhoneMapping> loadMappingFile(const char* fname)
 {

@@ -2,7 +2,6 @@ set(SOURCES
   PhoneMapping.cpp
   PhoneMapping.h
   ApiHandler.cpp
-  ApiHandler.h
   ApiServer.cpp
   )
 
