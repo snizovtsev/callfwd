@@ -1,15 +1,16 @@
+#include <functional>
 #include <gflags/gflags.h>
-#include "proxygen/lib/http/HTTPCommonHeaders.h"
-#include "proxygen/lib/http/HTTPMethod.h"
+#include <folly/small_vector.h>
+#include <proxygen/lib/http/HTTPCommonHeaders.h>
+#include <proxygen/lib/http/HTTPMethod.h>
 #include <proxygen/httpserver/RequestHandler.h>
 #include <proxygen/httpserver/RequestHandlerFactory.h>
 #include <proxygen/httpserver/ResponseBuilder.h>
 #include <proxygen/httpserver/filters/DirectResponseHandler.h>
-#include <callfwd/PhoneMapping.h>
+#include "PhoneMapping.h"
 
 
-DEFINE_uint32(max_query_length,
-              32768,
+DEFINE_uint32(max_query_length, 32768,
               "Maximum length of POST x-www-form-urlencoded body");
 
 
@@ -24,20 +25,18 @@ class TargetHandler final : public RequestHandler {
   }
 
   void onRequest(std::unique_ptr<HTTPMessage> req) noexcept override {
-    using namespace std::placeholders;
-
     if (req->getMethod() == HTTPMethod::GET) {
-      HTTPMessage::splitNameValuePieces(req->getQueryStringAsStringPiece(), '&', '=',
-                                        std::bind(&TargetHandler::onQueryParam,
-                                                  this, _1, _2));
+      onQueryString(req->getQueryStringAsStringPiece());
       onQueryComplete();
       return;
     }
 
     if (req->getMethod() == HTTPMethod::POST) {
+      using namespace std::placeholders;
       needBody_ = true;
-      req->getHeaders().forEachWithCode(std::bind(&TargetHandler::sanitizePostHeader,
-                                                  this, _1, _2, _3));
+      req->getHeaders()
+        .forEachWithCode(std::bind(&TargetHandler::sanitizePostHeader,
+                                   this, _1, _2, _3));
       if (needBody_)
         return;
     }
@@ -79,6 +78,12 @@ class TargetHandler final : public RequestHandler {
       .sendWithEOM();
   }
 
+  void onQueryString(StringPiece query) {
+    using namespace std::placeholders;
+    auto paramFn = std::bind(&TargetHandler::onQueryParam, this, _1, _2);
+    HTTPMessage::splitNameValuePieces(query, '&', '=', std::move(paramFn));
+  }
+
   void onQueryParam(StringPiece name, StringPiece value) {
     if (name == "phone%5B%5D" || name == "phone[]") {
       auto intValue = folly::tryTo<uint64_t>(value);
@@ -107,13 +112,8 @@ class TargetHandler final : public RequestHandler {
   }
 
   void onEOM() noexcept override {
-    using namespace std::placeholders;
-
     if (needBody_) {
-      StringPiece query = body_ ? StringPiece(body_->coalesce()) : "";
-      HTTPMessage::splitNameValuePieces(query, '&', '=',
-                                        std::bind(&TargetHandler::onQueryParam,
-                                                  this, _1, _2));
+      onQueryString(body_ ? StringPiece(body_->coalesce()) : "");
       onQueryComplete();
     }
   }
@@ -133,8 +133,8 @@ class TargetHandler final : public RequestHandler {
  private:
   bool needBody_ = false;
   std::unique_ptr<folly::IOBuf> body_;
-  std::vector<uint64_t> query_;
-  std::vector<uint64_t> resp_;
+  folly::small_vector<uint64_t, 16> query_;
+  folly::small_vector<uint64_t, 16> resp_;
   std::shared_ptr<PhoneMapping> db_;
 };
 
@@ -227,7 +227,7 @@ class ApiHandlerFactory : public RequestHandlerFactory {
   }
 
   RequestHandler* onRequest(RequestHandler *upstream, HTTPMessage *msg) noexcept override {
-    const folly::StringPiece path = msg->getPathAsStringPiece();
+    const StringPiece path = msg->getPathAsStringPiece();
 
     if (path == "/target") {
       return new TargetHandler(db_);

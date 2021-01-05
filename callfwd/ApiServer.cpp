@@ -10,17 +10,15 @@
 #include "PhoneMapping.h"
 
 
-using namespace proxygen;
+using proxygen::HTTPServer;
+using proxygen::HTTPServerOptions;
+using proxygen::RequestHandlerChain;
+using proxygen::RequestHandlerFactory;
 
-using folly::SocketAddress;
-
-using Protocol = HTTPServer::Protocol;
-
-DEFINE_int32(http_port, 11000, "Port to listen on with HTTP protocol");
-DEFINE_string(listen, "localhost", "IP/Hostname to bind to");
-DEFINE_string(listen1, "", "Additional address to bind to");
-DEFINE_string(listen2, "", "Additional address to bind to");
-DEFINE_string(listen3, "", "Additional address to bind to");
+DEFINE_uint32(http_port, 11000, "Port to listen on with HTTP protocol");
+DEFINE_string(http_if1, "localhost", "IP/Hostname to bind HTTP to");
+DEFINE_string(http_if2, "", "Additional address to bind HTTP to");
+DEFINE_string(http_if3, "", "Additional address to bind HTTP to");
 DEFINE_int32(threads,
              0,
              "Number of threads to listen on. Numbers <= 0 "
@@ -81,21 +79,18 @@ int main(int argc, char* argv[]) {
   google::InstallFailureSignalHandler();
   setlocale(LC_ALL, "C");
 
-  auto db = loadMappingFile(argv[1]);
-
-  std::vector<HTTPServer::IPConfig> IPs = {
-    {SocketAddress(FLAGS_listen, FLAGS_http_port, true), Protocol::HTTP},
-  };
-  if (!FLAGS_listen1.empty())
-    IPs.push_back({SocketAddress(FLAGS_listen1, FLAGS_http_port, true), Protocol::HTTP});
-  if (!FLAGS_listen2.empty())
-    IPs.push_back({SocketAddress(FLAGS_listen2, FLAGS_http_port, true), Protocol::HTTP});
-  if (!FLAGS_listen3.empty())
-    IPs.push_back({SocketAddress(FLAGS_listen3, FLAGS_http_port, true), Protocol::HTTP});
-
+  CHECK(FLAGS_http_port < 65536);
   if (FLAGS_threads <= 0) {
     FLAGS_threads = folly::hardware_concurrency();
     CHECK(FLAGS_threads > 0);
+  }
+
+  std::vector<HTTPServer::IPConfig> IPs;
+  for (const std::string &bindTo : {FLAGS_http_if1, FLAGS_http_if2, FLAGS_http_if3}) {
+    if (!bindTo.empty()) {
+      IPs.emplace_back(folly::SocketAddress{bindTo, FLAGS_http_port, true},
+                       HTTPServer::Protocol::HTTP);
+    }
   }
 
   HTTPServerOptions options;
@@ -108,8 +103,9 @@ int main(int argc, char* argv[]) {
   options.initialReceiveWindow = uint32_t(1 << 20);
   options.receiveStreamWindowSize = uint32_t(1 << 20);
   options.receiveSessionWindowSize = 10 * (1 << 20);
+  auto db = loadMappingFile(argv[1]);
   options.handlerFactories = RequestHandlerChain()
-    .addThen(std::move(makeApiHandlerFactory(db)))
+    .addThen(makeApiHandlerFactory(db))
     .build();
   HTTPServer server(std::move(options));
 
