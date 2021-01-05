@@ -1,10 +1,8 @@
-//#include "SipHandler.h"
-
 #include <gflags/gflags.h>
 #include <glog/logging.h>
 #include <folly/io/async/EventBaseManager.h>
 #include <folly/io/async/AsyncUDPServerSocket.h>
-#include <folly/io/IOBuf.h>
+#include <folly/io/IOBufQueue.h>
 #include <proxygen/httpserver/RequestHandlerFactory.h>
 #include "PhoneMapping.h"
 #include "Control.h"
@@ -30,6 +28,15 @@ class UDPAcceptor : public folly::AsyncUDPServerSocket::Callback {
 
   void onListenStopped() noexcept override {}
 
+  void copyHeader(const struct hdr_field* hdr) {
+    if (hdr) {
+      reply_.append(ToStringPiece(hdr->name));
+      reply_.append(": ");
+      reply_.append(ToStringPiece(hdr->body));
+      reply_.append("\r\n");
+    }
+  }
+
   void onDataAvailable(
       std::shared_ptr<folly::AsyncUDPSocket> socket,
       const folly::SocketAddress& client,
@@ -41,8 +48,9 @@ class UDPAcceptor : public folly::AsyncUDPServerSocket::Callback {
       return;
 
     memset(&msg_, 0, sizeof(msg_));
-    msg_.buf = (char*) data->data();
+    msg_.buf = (char*) data->writableBuffer();
     msg_.len = data->length();
+    reply_.clear();
 
     if (parse_msg(msg_.buf, msg_.len, &msg_) != 0) {
       LOG(INFO) << "Failed to parse SIP message";
@@ -52,31 +60,34 @@ class UDPAcceptor : public folly::AsyncUDPServerSocket::Callback {
     if (msg_.first_line.type != SIP_REQUEST)
       return;
 
-    std::string reply;
-    auto copyHeader = [&reply](struct hdr_field* hdr) {
-      if (hdr) {
-        reply += ToStringPiece(hdr->name);
-        reply += ": ";
-        reply += ToStringPiece(hdr->body);
-        reply += "\r\n";
-      }
-    };
+    switch (msg_.first_line.u.request.method_value) {
+    case METHOD_OPTIONS:
+      handleOptions(std::move(socket), client);
+      break;
+    case METHOD_INVITE:
+      handleInvite(std::move(socket), client);
+      break;
+    default:
+      return;
+    }
+  }
 
-    if (msg_.first_line.u.request.method_value == METHOD_OPTIONS) {
-      reply += "SIP/2.0 200 OK\r\n";
+  void handleOptions(std::shared_ptr<folly::AsyncUDPSocket> socket,
+                     const folly::SocketAddress& client)
+  {
+      reply_.append("SIP/2.0 200 OK\r\n");
       copyHeader(msg_.h_via1);
       copyHeader(msg_.from);
       copyHeader(msg_.to);
       copyHeader(msg_.callid);
       copyHeader(msg_.cseq);
-      reply += "Content-Length: 0\r\n\r\n";
-      socket->write(client, folly::IOBuf::copyBuffer(std::move(reply)));
-      return;
-    }
+      reply_.append("Content-Length: 0\r\n\r\n");
+      socket->write(client, reply_.move());
+  }
 
-    if (msg_.first_line.u.request.method_value != METHOD_INVITE)
-      return;
-
+  void handleInvite(std::shared_ptr<folly::AsyncUDPSocket> socket,
+                    const folly::SocketAddress& client)
+  {
     if (parse_sip_msg_uri(&msg_) != 0) {
       LOG(INFO) << "Failed to parse SIP URI";
       return;
@@ -92,7 +103,7 @@ class UDPAcceptor : public folly::AsyncUDPServerSocket::Callback {
       return;
     }
 
-    reply += "SIP/2.0 302 Moved Temporarily\r\n";
+    reply_.append("SIP/2.0 302 Moved Temporarily\r\n");
     copyHeader(msg_.h_via1);
     copyHeader(msg_.from);
     copyHeader(msg_.to);
@@ -106,24 +117,22 @@ class UDPAcceptor : public folly::AsyncUDPServerSocket::Callback {
     std::string target = "+1";
     target += folly::to<std::string>(targetPhone);
 
-    reply += "Contact: <";
-    reply += "sip:+1";
-    reply += user;
-    reply += ";rn=";
-    reply += target;
-    reply += ";ndpi@";
-    reply += ToStringPiece(msg_.parsed_uri.host);
-    reply += ':';
-    reply += ToStringPiece(msg_.parsed_uri.port);
-    reply += ">\r\n";
-
-    reply += "Location-Info: N\r\n"
-             "Content-Length: 0\r\n"
-             "\r\n";
-    socket->write(client, folly::IOBuf::copyBuffer(std::move(reply)));
+    reply_.append("Contact: <sip:+1");
+    reply_.append(user);
+    reply_.append(";rn=");
+    reply_.append(target);
+    reply_.append(";ndpi@");
+    reply_.append(ToStringPiece(msg_.parsed_uri.host));
+    reply_.append(":");
+    reply_.append(ToStringPiece(msg_.parsed_uri.port));
+    reply_.append(">\r\n"
+                  "Location-Info: N\r\n"
+                  "Content-Length: 0\r\n\r\n");
+    socket->write(client, reply_.move());
   }
 
  private:
+  folly::IOBufQueue reply_;
   struct sip_msg msg_;
 };
 
