@@ -1,13 +1,10 @@
-#include <fstream>
 #include <folly/Memory.h>
 #include <folly/io/async/EventBaseManager.h>
 #include <folly/portability/GFlags.h>
-#include <folly/portability/Unistd.h>
-#include <folly/portability/SysStat.h>
 #include <folly/system/HardwareConcurrency.h>
 #include <proxygen/httpserver/HTTPServer.h>
 
-#include "PhoneMapping.h"
+#include "Control.h"
 
 
 using proxygen::HTTPServer;
@@ -19,59 +16,17 @@ DEFINE_uint32(http_port, 11000, "Port to listen on with HTTP protocol");
 DEFINE_string(http_if1, "localhost", "IP/Hostname to bind HTTP to");
 DEFINE_string(http_if2, "", "Additional address to bind HTTP to");
 DEFINE_string(http_if3, "", "Additional address to bind HTTP to");
-DEFINE_int32(threads,
-             0,
+DEFINE_uint32(sip_port, 5061, "Port to listen on with SIP protocol");
+DEFINE_string(sip_if1, "127.0.0.1", "IP/Hostname to bind SIP to");
+DEFINE_string(sip_if2, "::1", "IP/Hostname to bind SIP to");
+DEFINE_string(sip_if3, "", "IP/Hostname to bind SIP to");
+DEFINE_string(sip_if4, "", "IP/Hostname to bind SIP to");
+DEFINE_int32(threads, 0,
              "Number of threads to listen on. Numbers <= 0 "
              "will use the number of cores on this machine.");
 
-std::unique_ptr<RequestHandlerFactory>
-makeApiHandlerFactory(std::shared_ptr<PhoneMapping> db);
-
-std::unique_ptr<RequestHandlerFactory>
-makeSipHandlerFactory(std::shared_ptr<PhoneMapping> db);
-
-std::shared_ptr<PhoneMapping> loadMappingFile(const char* fname)
-{
-  PhoneMappingBuilder builder;
-  std::string line;
-  std::vector<uint64_t> row;
-  size_t nrows = 0;
-
-  struct stat fstat;
-  std::vector<char> rbuf(1ull << 19);
-  std::ifstream in(fname);
-
-  if (in.fail()) {
-    LOG(FATAL) << "Failed to open " << fname;
-  }
-
-  memset(&fstat, 0, sizeof(fstat));
-  if (lstat(fname, &fstat) == 0) {
-    if (fstat.st_size > 1000) {
-      size_t lineEstimate = fstat.st_size / 23;
-      builder.SizeHint(lineEstimate + lineEstimate / 10);
-      LOG(INFO) << "Estimated number of lines: " << lineEstimate;
-    }
-  }
-
-
-  LOG(INFO) << "Reading database from " << fname << " ...";
-  in.rdbuf()->pubsetbuf(rbuf.data(), rbuf.size());
-  while (getline(in, line)) {
-    folly::splitTo<uint64_t>(",", line, std::back_inserter(row));
-    builder.addMapping(row[0], row[1]);
-    row.clear();
-    ++nrows;
-  }
-
-  if (!in.eof()) {
-    LOG(FATAL) << "Read failed on line " << nrows;
-  }
-  in.close();
-
-  LOG(INFO) << "Building index (" << nrows << " rows)...";
-  return builder.build();
-}
+std::unique_ptr<RequestHandlerFactory> makeApiHandlerFactory();
+std::unique_ptr<RequestHandlerFactory> makeSipHandlerFactory(std::vector<std::shared_ptr<folly::AsyncUDPServerSocket>> udpServer);
 
 int main(int argc, char* argv[]) {
   gflags::ParseCommandLineFlags(&argc, &argv, true);
@@ -86,10 +41,21 @@ int main(int argc, char* argv[]) {
   }
 
   std::vector<HTTPServer::IPConfig> IPs;
-  for (const std::string &bindTo : {FLAGS_http_if1, FLAGS_http_if2, FLAGS_http_if3}) {
-    if (!bindTo.empty()) {
-      IPs.emplace_back(folly::SocketAddress{bindTo, FLAGS_http_port, true},
+  for (std::string intf : {FLAGS_http_if1, FLAGS_http_if2, FLAGS_http_if3}) {
+    if (!intf.empty()) {
+      IPs.emplace_back(folly::SocketAddress{intf, FLAGS_http_port, true},
                        HTTPServer::Protocol::HTTP);
+    }
+  }
+
+  std::vector<std::shared_ptr<folly::AsyncUDPServerSocket>> udpServer;
+  folly::EventBase* evb = folly::EventBaseManager::get()->getEventBase();
+  for (std::string intf : {FLAGS_sip_if1, FLAGS_sip_if2, FLAGS_sip_if3, FLAGS_sip_if4}) {
+    if (!intf.empty()) {
+      auto socket = std::make_shared<folly::AsyncUDPServerSocket>(evb);
+      socket->bind(folly::SocketAddress(intf, FLAGS_sip_port));
+      LOG(INFO) << "SIP listening on " << socket->address().describe();
+      udpServer.push_back(std::move(socket));
     }
   }
 
@@ -103,16 +69,20 @@ int main(int argc, char* argv[]) {
   options.initialReceiveWindow = uint32_t(1 << 20);
   options.receiveStreamWindowSize = uint32_t(1 << 20);
   options.receiveSessionWindowSize = 10 * (1 << 20);
-  auto db = loadMappingFile(argv[1]);
   options.handlerFactories = RequestHandlerChain()
-    .addThen(makeApiHandlerFactory(db))
-    .addThen(makeSipHandlerFactory(db))
+    .addThen(makeApiHandlerFactory())
+    .addThen(makeSipHandlerFactory(udpServer))
     .build();
-  HTTPServer server(std::move(options));
 
+  HTTPServer server(std::move(options));
   LOG(INFO) << "Starting HTTP server on port " << FLAGS_http_port;
   server.bind(IPs);
-  server.start();
 
+  loadMappingFile(argv[1]);
+
+  LOG(INFO) << "Serving requests";
+  for (auto socket : udpServer)
+    socket->listen();
+  server.start();
   return 0;
 }

@@ -8,6 +8,7 @@
 #include <proxygen/httpserver/ResponseBuilder.h>
 #include <proxygen/httpserver/filters/DirectResponseHandler.h>
 #include "PhoneMapping.h"
+#include "Control.h"
 
 
 DEFINE_uint32(max_query_length, 32768,
@@ -215,11 +216,6 @@ class ReverseHandler final : public RequestHandler {
 
 class ApiHandlerFactory : public RequestHandlerFactory {
  public:
-  explicit ApiHandlerFactory(std::shared_ptr<PhoneMapping> db)
-    : db_(std::move(db))
-  {
-  }
-
   void onServerStart(folly::EventBase* /*evb*/) noexcept override {
   }
 
@@ -230,20 +226,16 @@ class ApiHandlerFactory : public RequestHandlerFactory {
     const StringPiece path = msg->getPathAsStringPiece();
 
     if (path == "/target") {
-      return new TargetHandler(db_);
+      return new TargetHandler(getPhoneMapping());
     } else if (path == "/reverse") {
-      return new ReverseHandler(db_);
+      return new ReverseHandler(getPhoneMapping());
     }
 
     return new DirectResponseHandler(404, "Not found", "");
   }
-
- private:
-  std::shared_ptr<PhoneMapping> db_;
 };
 
-std::unique_ptr<RequestHandlerFactory>
-makeApiHandlerFactory(std::shared_ptr<PhoneMapping> db)
+std::unique_ptr<RequestHandlerFactory> makeApiHandlerFactory()
 {
-  return std::make_unique<ApiHandlerFactory>(std::move(db));
+  return std::make_unique<ApiHandlerFactory>();
 }

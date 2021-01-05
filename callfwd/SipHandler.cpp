@@ -7,6 +7,7 @@
 #include <folly/io/IOBuf.h>
 #include <proxygen/httpserver/RequestHandlerFactory.h>
 #include "PhoneMapping.h"
+#include "Control.h"
 
 extern "C" {
 #include <lib/osips_parser/msg_parser.h>
@@ -19,20 +20,12 @@ using proxygen::RequestHandler;
 using proxygen::HTTPMessage;
 using folly::StringPiece;
 
-DEFINE_uint32(sip_port, 5061, "Port to listen on with SIP protocol");
-DEFINE_string(sip_if1, "0.0.0.0", "IP/Hostname to bind SIP to");
-
 static StringPiece ToStringPiece(str s) {
   return StringPiece(s.s, s.len);
 }
 
 class UDPAcceptor : public folly::AsyncUDPServerSocket::Callback {
  public:
-  UDPAcceptor(std::shared_ptr<PhoneMapping> db)
-    : db_(std::move(db))
-  {
-  }
-
   void onListenStarted() noexcept override {}
 
   void onListenStopped() noexcept override {}
@@ -106,7 +99,8 @@ class UDPAcceptor : public folly::AsyncUDPServerSocket::Callback {
     copyHeader(msg_.callid);
     copyHeader(msg_.cseq);
 
-    uint64_t targetPhone = db_->findTarget(userPhone);
+    auto db = getPhoneMapping();
+    uint64_t targetPhone = db->findTarget(userPhone);
     if (targetPhone == PhoneMapping::NONE)
       targetPhone = userPhone;
     std::string target = "+1";
@@ -130,29 +124,20 @@ class UDPAcceptor : public folly::AsyncUDPServerSocket::Callback {
   }
 
  private:
-  std::shared_ptr<PhoneMapping> db_;
   struct sip_msg msg_;
 };
 
 class SipHandlerFactory : public proxygen::RequestHandlerFactory {
  public:
-  explicit SipHandlerFactory(std::shared_ptr<PhoneMapping> db)
-    : db_(std::move(db))
+  explicit SipHandlerFactory(std::vector<std::shared_ptr<folly::AsyncUDPServerSocket>> udpServer)
+    : server_(std::move(udpServer))
   {
-    folly::EventBase* evb = folly::EventBaseManager::get()->getEventBase();
-    socket_ = std::make_unique<folly::AsyncUDPServerSocket>(evb);
-    try {
-      socket_->bind(folly::SocketAddress(FLAGS_sip_if1, FLAGS_sip_port));
-      LOG(INFO) << "Server listening on " << socket_->address().describe();
-    } catch (const std::exception& ex) {
-      LOG(FATAL) << ex.what();
-    }
-    socket_->listen();
   }
 
   void onServerStart(folly::EventBase* evb) noexcept override {
     // Add UDP handler here
-    socket_->addListener(evb, new UDPAcceptor(db_));
+    for (auto socket : server_)
+      socket->addListener(evb, new UDPAcceptor);
   }
 
   void onServerStop() noexcept override {
@@ -164,13 +149,11 @@ class SipHandlerFactory : public proxygen::RequestHandlerFactory {
   }
 
  private:
-  std::shared_ptr<PhoneMapping> db_;
-  std::unique_ptr<folly::AsyncUDPServerSocket> socket_;
+  std::vector<std::shared_ptr<folly::AsyncUDPServerSocket>> server_;
 };
 
 
-std::unique_ptr<RequestHandlerFactory>
-makeSipHandlerFactory(std::shared_ptr<PhoneMapping> db)
+std::unique_ptr<RequestHandlerFactory> makeSipHandlerFactory(std::vector<std::shared_ptr<folly::AsyncUDPServerSocket>> udpServer)
 {
-  return std::make_unique<SipHandlerFactory>(std::move(db));
+  return std::make_unique<SipHandlerFactory>(std::move(udpServer));
 }
