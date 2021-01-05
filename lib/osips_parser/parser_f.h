@@ -27,7 +27,7 @@
 #ifndef parser_f_h
 #define parser_f_h
 
-#include "../str.h"
+#include "str.h"
 
 char* eat_line(char* buffer, unsigned int len);
 

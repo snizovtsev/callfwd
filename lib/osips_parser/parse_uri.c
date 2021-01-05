@@ -36,12 +36,12 @@
 
 #include "parse_uri.h"
 #include <string.h>
-#include "../dprint.h"
-#include "../ut.h"   /* q_memchr */
-#include "../error.h"
-#include "../errinfo.h"
-#include "../core_stats.h"
-#include "../strcommon.h"
+#include "dprint.h"
+#include "ut.h"   /* q_memchr */
+#include "error.h"
+#include "errinfo.h"
+#include "core_stats.h"
+#include "strcommon.h"
 
 static const str uri_type_names[7] = {
 	{NULL, 0}, /*This is the error type*/

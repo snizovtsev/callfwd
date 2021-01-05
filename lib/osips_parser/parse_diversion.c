@@ -20,9 +20,9 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include "../dprint.h"
-#include "../ut.h"
-#include "../mem/mem.h"
+#include "dprint.h"
+#include "ut.h"
+#include "mem.h"
 #include "parse_from.h"
 #include "parse_to.h"
 #include "msg_parser.h"

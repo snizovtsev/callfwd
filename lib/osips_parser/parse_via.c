@@ -47,10 +47,10 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include "../dprint.h"
-#include "../ut.h"
-#include "../ip_addr.h"
-#include "../mem/mem.h"
+#include "dprint.h"
+#include "ut.h"
+#include "ip_addr.h"
+#include "mem.h"
 #include "parse_via.h"
 #include "parse_def.h"
 

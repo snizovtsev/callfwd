@@ -27,12 +27,11 @@
  */
 
 #include <string.h>
-#include "../str.h"
-#include "../ut.h"
-#include "../dprint.h"
-#include "../trim.h"
-#include "../mem/mem.h"
-#include "../mem/shm_mem.h"
+#include "str.h"
+#include "ut.h"
+#include "dprint.h"
+#include "trim.h"
+#include "mem.h"
 #include "parse_param.h"
 
 

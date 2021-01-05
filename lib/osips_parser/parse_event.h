@@ -28,7 +28,7 @@
 #ifndef PARSE_EVENT_H
 #define PARSE_EVENT_H
 
-#include "../str.h"
+#include "str.h"
 #include "hf.h"
 #include "parse_param.h"
 

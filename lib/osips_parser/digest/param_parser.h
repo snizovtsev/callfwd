@@ -24,7 +24,7 @@
 #ifndef PARAM_PARSER_H
 #define PARAM_PARSER_H
 
-#include "../../str.h"
+#include "../str.h"
 
 
 /*

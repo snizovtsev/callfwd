@@ -22,7 +22,7 @@
 #ifndef PARSE_FLINE_H
 #define PARSE_FLINE_H
 
-#include "../str.h"
+#include "str.h"
 
 /* Message is request */
 #define SIP_REQUEST 1

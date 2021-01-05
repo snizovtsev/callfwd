@@ -28,11 +28,11 @@
 
 #include <stdio.h>          /* printf */
 #include <string.h>         /* memset */
-#include "../mem/mem.h"     /* pkg_malloc, pkg_free */
-#include "../dprint.h"
-#include "../trim.h"        /* trim_leading */
-#include "../ut.h"
-#include "../errinfo.h"
+#include "mem.h"     /* pkg_malloc, pkg_free */
+#include "dprint.h"
+#include "trim.h"        /* trim_leading */
+#include "ut.h"
+#include "errinfo.h"
 #include "parse_expires.h"
 
 

@@ -22,9 +22,9 @@
  * 2011-12-07 Initial revision (osas@voipembedded.com)
  */
 
-#include "../error.h"
-#include "../dprint.h"
-#include "../errinfo.h"
+#include "error.h"
+#include "dprint.h"
+#include "errinfo.h"
 #include "parse_sst.h"
 
 

@@ -27,10 +27,10 @@
 
 
 #include "digest_parser.h"
-#include "../../trim.h"    /* trim_leading */
+#include "../trim.h"    /* trim_leading */
 #include <string.h>        /* strncasecmp */
 #include "param_parser.h"  /* Digest parameter name parser */
-#include "../../ut.h"      /* q_memchr */
+#include "../ut.h"      /* q_memchr */
 
 
 #define DIGEST_SCHEME "digest"

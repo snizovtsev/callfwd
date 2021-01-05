@@ -22,8 +22,8 @@
 
 
 #include "digest.h"
-#include "../../mem/mem.h"  /* pkg_malloc */
-#include "../../dprint.h"   /* Guess what */
+#include "../mem.h"  /* pkg_malloc */
+#include "../dprint.h"   /* Guess what */
 #include <stdio.h>          /* printf */
 #include <string.h>         /* strncasecmp */
 

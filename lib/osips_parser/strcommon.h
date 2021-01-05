@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2001-2003 FhG FOKUS
+ * Copyright (C) 2007 voice-system.ro
  *
  * This file is part of opensips, a free SIP server.
  *
@@ -16,29 +16,38 @@
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
+ *
+ */
+/*!
+ * \file
+ * \brief Common string handling functions
  */
 
-#ifndef PARSE_SIPIFMATCH_H
-#define PARSE_SIPIFMATCH_H
+#ifndef _STRCOMMON_H_
+#define _STRCOMMON_H_
 
 #include "str.h"
-#include "hf.h"
-
-typedef struct etag {
-	str text;       /* Original string representation */
-} etag_t;
-
 
 /*
- * Parse Sipifmatch HF body
+ * add backslashes to special characters
  */
-int parse_sipifmatch(struct hdr_field* _h);
-
-
+int escape_common(char *dst, char *src, int src_len);
 /*
- * Release memory
+ * remove backslashes to special characters
  */
-void free_sipifmatch(str** _e);
+int unescape_common(char *dst, char *src, int src_len);
 
+int unescape_xml(char *dst, char *src, int src_len);
 
-#endif /* PARSE_SIPIFMATCH_H */
+void compute_md5(char *dst, char *src, int src_len);
+
+int escape_user(str *sin, str *sout);
+
+int unescape_user(str *sin, str *sout);
+
+int escape_param(str *sin, str *sout);
+
+int unescape_param(str *sin, str *sout);
+
+#endif
+

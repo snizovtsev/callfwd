@@ -25,7 +25,7 @@
 #ifndef PARSE_ALLOW_H
 #define PARSE_ALLOW_H
 
-#include "../mem/mem.h"
+#include "mem.h"
 #include "msg_parser.h"
 
 

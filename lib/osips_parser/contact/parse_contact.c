@@ -26,10 +26,10 @@
 
 #include <string.h>          /* memset */
 #include "../hf.h"
-#include "../../mem/mem.h"   /* pkg_malloc, pkg_free */
-#include "../../dprint.h"
-#include "../../trim.h"      /* trim_leading */
-#include "../../errinfo.h"      /* trim_leading */
+#include "../mem.h"   /* pkg_malloc, pkg_free */
+#include "../dprint.h"
+#include "../trim.h"      /* trim_leading */
+#include "../errinfo.h"      /* trim_leading */
 #include "parse_contact.h"
 
 

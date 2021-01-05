@@ -21,7 +21,7 @@
  *
  */
 
-#include "../mem/mem.h"
+#include "mem.h"
 #include "keys.h"
 #include "parse_supported.h"
 

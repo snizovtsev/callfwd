@@ -25,9 +25,9 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include "../dprint.h"
-#include "../trim.h"
-#include "../errinfo.h"
+#include "dprint.h"
+#include "trim.h"
+#include "errinfo.h"
 #include "parse_privacy.h"
 #include "msg_parser.h"
 

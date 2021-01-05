@@ -27,12 +27,12 @@
  */
 
 
-#include "../dprint.h"
+#include "dprint.h"
 #include "msg_parser.h"
 #include "parser_f.h"
 #include "parse_methods.h"
-#include "../mem/mem.h"
-#include "../ut.h"
+#include "mem.h"
+#include "ut.h"
 
 /* grammar:
 	request  =  method SP uri SP version CRLF

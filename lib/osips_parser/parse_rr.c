@@ -28,12 +28,11 @@
  */
 #include <string.h>
 #include "parse_rr.h"
-#include "../mem/mem.h"
-#include "../mem/shm_mem.h"
-#include "../dprint.h"
-#include "../trim.h"
-#include "../ut.h"
-#include "../errinfo.h"
+#include "mem.h"
+#include "dprint.h"
+#include "trim.h"
+#include "ut.h"
+#include "errinfo.h"
 
 /*
  * Parse Route or Record-Route body

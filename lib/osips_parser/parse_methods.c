@@ -26,9 +26,9 @@
  */
 
 #include <strings.h>
-#include "../dprint.h"
-#include "../trim.h"
-#include "../core_stats.h"
+#include "dprint.h"
+#include "trim.h"
+#include "core_stats.h"
 #include "parse_methods.h"
 #include "msg_parser.h"
 

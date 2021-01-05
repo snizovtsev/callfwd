@@ -24,7 +24,7 @@
 #ifndef _PARSE_SIPBODY
 #define _PARSE_SIPBODY
 
-#include "../mem/mem.h"
+#include "mem.h"
 
 struct body_part;
 

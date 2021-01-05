@@ -28,10 +28,10 @@
  */
 
 
-#include "../ut.h"
-#include "../str.h"
-#include "../net/trans.h"
-#include "../parser/msg_parser.h"
+#include "ut.h"
+#include "str.h"
+/*#include "../net/trans.h"*/
+#include "msg_parser.h"
 
 #define SIP_SCH			0x3a706973
 #define SIPS_SCH		0x73706973
@@ -78,6 +78,7 @@ char * uri_type2str(const uri_type type, char *result);
 int uri_typestrlen(const uri_type type);
 uri_type str2uri_type(char * buf);
 
+#if 0
 /* Gets (in a SIP wise manner) the SIP port from a SIP URI ; if the port
    is not explicitly set in the URI, it returns the default port corresponding
    to the used transport protocol (if protocol misses, we assume the default
@@ -103,6 +104,7 @@ static inline unsigned short get_uri_port(struct sip_uri* _uri,
 
 	return port;
 }
+#endif
 
 
 /**

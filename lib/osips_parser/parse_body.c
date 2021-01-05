@@ -20,8 +20,8 @@
  *
  */
 
-#include "../mem/mem.h"
-#include "../ut.h"
+#include "mem.h"
+#include "ut.h"
 #include "parse_body.h"
 #include "parse_content.h"
 #include "parse_hname2.h"
@@ -571,8 +571,10 @@ int should_update_sip_body(struct sip_msg *msg)
 		return 0;
 
 	/* body changed using lumps */
+#if 0
 	if (msg->body_lumps)
 		return 1;
+#endif
 
 	for(part = &msg->body->first; part; part = part->next) {
 		/* body removed or added */

@@ -20,7 +20,8 @@
 
 #include <ctype.h>
 #include <strings.h>
-#include "../mem/mem.h"
+#include "mem.h"
+#include "dprint.h"
 #include "parse_list_hdr.h"
 
 

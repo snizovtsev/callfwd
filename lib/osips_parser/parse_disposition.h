@@ -24,7 +24,7 @@
 #ifndef _PARSE_DISPOSITION_H_
 #define _PARSE_DISPOSITION_H_
 
-#include "../str.h"
+#include "str.h"
 #include "msg_parser.h"
 
 

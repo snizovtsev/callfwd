@@ -25,9 +25,9 @@
  */
 
 #include <string.h>        /* memset */
-#include "../../mem/mem.h" /* pkg_malloc, pkg_free */
-#include "../../dprint.h"
-#include "../../trim.h"    /* trim_leading, trim_trailing */
+#include "../mem.h" /* pkg_malloc, pkg_free */
+#include "../dprint.h"
+#include "../trim.h"    /* trim_leading, trim_trailing */
 #include "contact.h"
 
 

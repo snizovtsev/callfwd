@@ -30,7 +30,7 @@
 
 #include "parse_hname2.h"
 #include "keys.h"
-#include "../ut.h"  /* q_memchr */
+#include "ut.h"  /* q_memchr */
 
 #define LOWER_BYTE(b) ((b) | 0x20)
 #define LOWER_DWORD(d) ((d) | 0x20202020)

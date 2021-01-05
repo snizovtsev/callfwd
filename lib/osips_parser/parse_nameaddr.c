@@ -24,10 +24,10 @@
  */
 
 #include <string.h>
-#include "../dprint.h"
+#include "dprint.h"
 #include "parse_nameaddr.h"
 #include "parser_f.h"
-#include "../ut.h"
+#include "ut.h"
 
 
 /*

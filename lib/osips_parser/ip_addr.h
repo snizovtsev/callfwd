@@ -392,9 +392,9 @@ extern char _ip_addr_A_buff[IP_ADDR_MAX_STR_SIZE];
 static inline char* ip_addr2a(struct ip_addr* ip)
 {
 	int offset;
-	register unsigned char a,b,c;
-	register unsigned char d;
-	register unsigned short hex4;
+	unsigned char a,b,c;
+	unsigned char d;
+	unsigned short hex4;
 	int r;
 	#define HEXDIG(x) (((x)>=10)?(x)-10+'A':(x)+'0')
 

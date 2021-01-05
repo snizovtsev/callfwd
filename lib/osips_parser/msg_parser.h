@@ -42,13 +42,15 @@
 
 #include <strings.h>
 
-#include "../str.h"
-#include "../lump_struct.h"
-#include "../flags.h"
-#include "../ip_addr.h"
-#include "../md5utils.h"
-#include "../qvalue.h"
-#include "../config.h"
+#include "str.h"
+#if 0
+#include "lump_struct.h"
+#endif
+#include "flags.h"
+#include "ip_addr.h"
+#include "md5utils.h"
+#include "qvalue.h"
+#include "config.h"
 #include "parse_def.h"
 #include "parse_cseq.h"
 #include "parse_content.h"
@@ -56,7 +58,7 @@
 #include "parse_fline.h"
 #include "parse_body.h"
 #include "hf.h"
-#include "../trim.h"
+#include "trim.h"
 
 
 /* convenience short-cut macros */
@@ -308,10 +310,12 @@ struct sip_msg {
 	int parsed_orig_ruri_ok;
 	struct sip_uri parsed_orig_ruri;
 
+#if 0
 	/* modifications */
 	struct lump* add_rm;       /* used for all the forwarded requests/replies */
 	struct lump* body_lumps;     /* Lumps that update Content-Length */
 	struct lump_rpl *reply_lump; /* only for localy generated replies !!!*/
+#endif
 
 	/* whatever whoever want to append to branch comes here */
 	char add_to_branch_s[MAX_BRANCH_PARAM_LEN];

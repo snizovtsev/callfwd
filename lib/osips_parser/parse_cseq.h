@@ -22,7 +22,7 @@
 #ifndef PARSE_CSEQ
 #define PARSE_CSEQ
 
-#include "../str.h"
+#include "str.h"
 
 
 struct cseq_body{

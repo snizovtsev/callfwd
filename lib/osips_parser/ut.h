@@ -31,16 +31,20 @@
 #include <limits.h>
 #include <unistd.h>
 #include <ctype.h>
+#include <stdint.h>
+#include <stdio.h>
 
 #include "config.h"
 #include "dprint.h"
+#include "str.h"
+/*
 #include "sr_module.h"
 #include "action.h"
-#include "str.h"
 #include "evi/evi_modules.h"
 #include "evi/evi_core.h"
+*/
 
-#include "mem/shm_mem.h"
+#include "mem.h"
 
 typedef struct _int_str_t {
 	union {
@@ -465,6 +469,7 @@ inline static void sleep_us( unsigned int nusecs )
 }
 
 
+#if 0
 /* portable determination of max_path */
 inline static int pathmax(void)
 {
@@ -479,6 +484,7 @@ inline static int pathmax(void)
 	}
 	return pathmax;
 }
+#endif
 
 inline static int hex2int(char hex_digit)
 {
@@ -737,7 +743,7 @@ static inline int strno2int( str *val, unsigned int *mask )
  */
 static inline int shm_str_dup(str* dst, const str* src)
 {
-	dst->s = shm_malloc(src->len);
+	dst->s = (char*)shm_malloc(src->len);
 	if (!dst->s) {
 		LM_ERR("no shared memory left\n");
 		dst->len = 0;
@@ -761,7 +767,7 @@ static inline int shm_nt_str_dup(str* dst, const str* src)
 		return 0;
 	}
 
-	dst->s = shm_malloc(src->len + 1);
+	dst->s = (char*)shm_malloc(src->len + 1);
 	if (!dst->s) {
 		LM_ERR("no shared memory left\n");
 		dst->len = 0;
@@ -785,7 +791,7 @@ static inline int pkg_nt_str_dup(str* dst, const str* src)
 		return 0;
 	}
 
-	dst->s = pkg_malloc(src->len + 1);
+	dst->s = (char*)pkg_malloc(src->len + 1);
 	if (!dst->s) {
 		LM_ERR("no private memory left\n");
 		dst->len = 0;
@@ -807,7 +813,7 @@ static inline char *shm_strdup(const char *str)
 		return NULL;
 
 	len = strlen(str) + 1;
-	rval = shm_malloc(len);
+	rval = (char*)shm_malloc(len);
 	if (!rval)
 		return NULL;
 	memcpy(rval, str, len);
@@ -824,7 +830,7 @@ static inline int shm_str_extend(str *in, int size)
 	char *p;
 
 	if (in->len < size) {
-		p = shm_realloc(in->s, size);
+		p = (char*)shm_realloc(in->s, size);
 		if (!p) {
 			LM_ERR("oom\n");
 			return -1;
@@ -876,7 +882,7 @@ static inline void shm_str_clean(str* dst)
  */
 static inline int pkg_str_dup(str* dst, const str* src)
 {
-	dst->s = pkg_malloc(src->len);
+	dst->s = (char*)pkg_malloc(src->len);
 	if (!dst->s) {
 		LM_ERR("no private memory left\n");
 		dst->len = 0;
@@ -897,7 +903,7 @@ static inline char *pkg_strdup(const char *str)
 		return NULL;
 
 	len = strlen(str) + 1;
-	rval = pkg_malloc(len);
+	rval = (char*)pkg_malloc(len);
 	if (!rval)
 		return NULL;
 	memcpy(rval, str, len);
@@ -910,7 +916,7 @@ static inline int pkg_str_extend(str *in, int size)
 	char *p;
 
 	if (in->len < size) {
-		p = pkg_realloc(in->s, size);
+		p = (char*)pkg_realloc(in->s, size);
 		if (!p) {
 			LM_ERR("oom\n");
 			return -1;
@@ -1198,6 +1204,8 @@ static inline int get_time_diff(struct timeval *begin)
 	return mtime;
 }
 
+#if 0
+
 #define reset_longest_action_list(threshold) \
 	do { \
 		if ((threshold)) { \
@@ -1275,6 +1283,7 @@ static inline void log_expiry(int time_diff,int expire,
 error:
 	evi_free_params(list);
 }
+#endif
 
 static inline int get_timestamp(int *sec,int *usec)
 {

@@ -32,7 +32,7 @@
 #ifndef HF_H
 #define HF_H
 
-#include "../str.h"
+#include "str.h"
 
 /**
  * SIP Header types.

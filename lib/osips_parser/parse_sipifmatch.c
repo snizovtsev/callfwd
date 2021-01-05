@@ -21,11 +21,11 @@
 #include <string.h>
 
 #include "parse_sipifmatch.h"
-#include "../dprint.h"
+#include "dprint.h"
 #include "parse_def.h"
-#include "../mem/mem.h"
-#include "../trim.h"
-#include "../errinfo.h"
+#include "mem.h"
+#include "trim.h"
+#include "errinfo.h"
 
 static inline char* skip_token(char* _b, int _l)
 {

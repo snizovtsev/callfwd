@@ -30,7 +30,7 @@
 
 #include <stdio.h>
 #include "../hf.h"
-#include "../../str.h"
+#include "../str.h"
 #include "../msg_parser.h"
 #include "contact.h"
 

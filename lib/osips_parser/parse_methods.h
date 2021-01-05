@@ -21,7 +21,7 @@
 #ifndef PARSE_METHODS_H
 #define PARSE_METHODS_H
 
-#include "../str.h"
+#include "str.h"
 
 #define ALL_METHODS  (0xFFFFFFFF)
 

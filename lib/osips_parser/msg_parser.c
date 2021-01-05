@@ -41,24 +41,19 @@
 
 #include "msg_parser.h"
 #include "parser_f.h"
-#include "../ut.h"
-#include "../error.h"
-#include "../dprint.h"
-#include "../data_lump_rpl.h"
-#include "../mem/mem.h"
-#include "../error.h"
-#include "../globals.h"
-#include "../core_stats.h"
-#include "../errinfo.h"
-#include "../dset.h"
+#include "ut.h"
+#include "error.h"
+#include "dprint.h"
+/*#include "../data_lump_rpl.h"*/
+#include "mem.h"
+/*#include "../globals.h"*/
+#include "core_stats.h"
+#include "errinfo.h"
+/*#include "../dset.h"*/
 #include "parse_hname2.h"
 #include "parse_uri.h"
 #include "parse_content.h"
-#include "../msg_callbacks.h"
-
-#ifdef DEBUG_DMALLOC
-#include <mem/dmalloc.h>
-#endif
+/*#include "../msg_callbacks.h"*/
 
 
 #define parse_hname(_b,_e,_h) parse_hname2((_b),(_e),(_h))
@@ -805,6 +800,7 @@ error:
 
 
 
+#if 0
 void free_reply_lump( struct lump_rpl *lump)
 {
 	struct lump_rpl *foo, *bar;
@@ -815,14 +811,17 @@ void free_reply_lump( struct lump_rpl *lump)
 		foo = bar;
 	}
 }
+#endif
 
 
 /* Free only the content, not the msg structure itself
  * NOTE: the function doesn't do any cleanup/reset of the subfields */
 void free_sip_msg(struct sip_msg* msg)
 {
+#if 0
 	if (msg->msg_cb)
 		msg_callback_process(msg, MSG_DESTROY, NULL);
+#endif
 	if (msg->new_uri.s)
 		pkg_free(msg->new_uri.s);
 	if (msg->set_global_address.s)
@@ -835,12 +834,14 @@ void free_sip_msg(struct sip_msg* msg)
 		pkg_free(msg->path_vec.s);
 	if (msg->headers)
 		free_hdr_field_lst(msg->headers);
+#if 0
 	if (msg->add_rm)
 		free_lump_list(msg->add_rm);
 	if (msg->body_lumps)
 		free_lump_list(msg->body_lumps);
 	if (msg->reply_lump)
 		free_reply_lump(msg->reply_lump);
+#endif
 	if (msg->body )
 		free_sip_body(msg->body);
 	/* don't free anymore -- now a pointer to a static buffer */

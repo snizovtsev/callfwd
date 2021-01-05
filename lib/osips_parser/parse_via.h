@@ -33,7 +33,7 @@
 #ifndef PARSE_VIA_H
 #define PARSE_VIA_H
 
-#include "../str.h"
+#include "str.h"
 
 /* via param types
  * WARNING: keep in sync with parse_via.c FIN_HIDDEN...

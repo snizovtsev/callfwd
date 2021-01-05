@@ -20,8 +20,8 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#include "../mem/mem.h"
-#include "../ut.h"
+#include "mem.h"
+#include "ut.h"
 
 #include "parse_fcaps.h"
 

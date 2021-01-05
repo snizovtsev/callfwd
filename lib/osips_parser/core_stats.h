@@ -34,7 +34,7 @@
 #ifndef _CORE_STATS_H_
 #define _CORE_STATS_H_
 
-#include "mem/mem.h"
+#include "mem.h"
 #include "statistics.h"
 
 #ifdef STATISTICS

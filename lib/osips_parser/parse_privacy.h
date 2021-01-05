@@ -22,7 +22,7 @@
 #ifndef PARSE_PRIVACY_H
 #define PARSE_PRIVACY_H
 
-#include "../mem/mem.h"
+#include "mem.h"
 #include "msg_parser.h"
 
 

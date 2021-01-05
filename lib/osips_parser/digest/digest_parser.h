@@ -29,7 +29,7 @@
 #ifndef DIGEST_PARSER_H
 #define DIGEST_PARSER_H
 
-#include "../../str.h"
+#include "../str.h"
 
 
 /* Type of algorithm used */

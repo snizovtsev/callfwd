@@ -29,7 +29,7 @@
 #define CONTACT_H
 
 #include <stdio.h>
-#include "../../str.h"
+#include "../str.h"
 #include "../parse_param.h"
 
 

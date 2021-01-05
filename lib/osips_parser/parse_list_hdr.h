@@ -19,7 +19,7 @@
  */
 
 
-#include "../str.h"
+#include "str.h"
 #include "hf.h"
 
 /* Set of functions to parse (split into a list of tokens) body headers

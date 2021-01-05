@@ -22,8 +22,8 @@
 
 #include "param_parser.h"
 #include "digest_keys.h"
-#include "../../trim.h"
-#include "../../ut.h"
+#include "../trim.h"
+#include "../ut.h"
 
 #define LOWER_BYTE(b) ((b) | 0x20)
 #define LOWER_DWORD(d) ((d) | 0x20202020)

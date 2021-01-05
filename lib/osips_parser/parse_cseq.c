@@ -24,12 +24,12 @@
  */
 
 
-#include "../dprint.h"
+#include "dprint.h"
 #include "parse_cseq.h"
 #include "parser_f.h"  /* eat_space_end and so on */
 #include "parse_def.h"
 #include "parse_methods.h"
-#include "../mem/mem.h"
+#include "mem.h"
 
 /*
  * Parse CSeq header field

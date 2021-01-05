@@ -26,7 +26,7 @@
 #define PARSE_NAMEADDR_H
 
 #include <stdio.h>
-#include "../str.h"
+#include "str.h"
 
 /*
  * Name-addr structure, see RFC3261 for more details

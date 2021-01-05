@@ -32,7 +32,7 @@
 #ifndef _SDP_HLPR_FUNCS_H
 #define  _SDP_HLPR_FUNCS_H
 
-#include "../../str.h"
+#include "../str.h"
 #include "../msg_parser.h"
 
 int extract_field(str *body, str *value, str field);

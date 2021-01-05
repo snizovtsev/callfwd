@@ -36,8 +36,8 @@
 #include <stdio.h>
 #include "error.h"
 #include "str.h"
-#include "parser/msg_parser.h"
-#include "mem/mem.h"
+#include "msg_parser.h"
+#include "mem.h"
 
 /*! current function's error; */
 int ser_error=-1;

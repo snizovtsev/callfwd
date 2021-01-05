@@ -25,9 +25,9 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include "../dprint.h"
-#include "../errinfo.h"
-#include "../mem/mem.h"
+#include "dprint.h"
+#include "errinfo.h"
+#include "mem.h"
 #include "parse_allow.h"
 #include "parse_methods.h"
 #include "msg_parser.h"

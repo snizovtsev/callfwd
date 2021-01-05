@@ -23,7 +23,7 @@
 #ifndef PARSE_TO
 #define PARSE_TO
 
-#include "../str.h"
+#include "str.h"
 #include "msg_parser.h"
 
 enum {

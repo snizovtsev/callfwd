@@ -30,11 +30,11 @@
 #include <stdlib.h>
 #include <sys/types.h>
 #include <unistd.h>
-#include "../mem/mem.h"
-#include "../dprint.h"
-#include "../str.h"
-#include "../ut.h"
-#include "../errinfo.h"
+#include "mem.h"
+#include "dprint.h"
+#include "str.h"
+#include "ut.h"
+#include "errinfo.h"
 #include "parse_content.h"
 
 

@@ -28,10 +28,10 @@
 #include "parse_uri.h"
 #include <stdlib.h>
 #include <string.h>
-#include "../errinfo.h"
-#include "../dprint.h"
-#include "../ut.h"
-#include "../mem/mem.h"
+#include "errinfo.h"
+#include "dprint.h"
+#include "ut.h"
+#include "mem.h"
 #include "msg_parser.h"
 
 /*
