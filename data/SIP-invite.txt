@@ -1,0 +1,12 @@
+INVITE sip:+12012000001@204.9.202.153:5060;user=phone SIP/2.0
+Via: SIP/2.0/UDP 204.9.202.155:4319;branch=z9h64bK1953406209
+From: <sip:18666654386@204.9.202.155:4319;user=phone>;tag=339948729
+To: <sip:12018660805@204.9.202.153:5060;user=phone>
+Call-ID: s0-9bca09cc-0fd4fc38-7f21bd45-2d08fdc6
+CSeq: 2311677411 INVITE
+Max-Forwards: 70
+Contact: <sip:18666654386@204.9.202.155:4319;transport=udp>
+Content-Type: application/sdp
+Content-Length: 0
+
+

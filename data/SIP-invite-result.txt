@@ -1,0 +1,11 @@
+2020/12/23 12:09:11.582339 204.9.202.153:5060 -> 204.9.202.155:4319
+SIP/2.0 302 Moved Temporarily
+Via: SIP/2.0/UDP 204.9.202.155:4319;branch=z9h64bK1953406209
+From: <sip:18666654386@204.9.202.155:4319;user=phone>;tag=339948729
+To: <sip:12018660805@204.9.202.153:5060;user=phone>;tag=13bd22f6
+Call-ID: s0-9bca09cc-0fd4fc38-7f21bd45-2d08fdc6
+CSeq: 2311677411 INVITE
+Contact: <sip:+12018660805;rn=+12018209999;npdi@204.9.202.153:5060>
+Location-Info: N
+Content-Length: 0
+

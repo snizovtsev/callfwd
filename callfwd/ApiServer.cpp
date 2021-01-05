@@ -106,6 +106,7 @@ int main(int argc, char* argv[]) {
   auto db = loadMappingFile(argv[1]);
   options.handlerFactories = RequestHandlerChain()
     .addThen(makeApiHandlerFactory(db))
+    .addThen(makeSipHandlerFactory(db))
     .build();
   HTTPServer server(std::move(options));
 
