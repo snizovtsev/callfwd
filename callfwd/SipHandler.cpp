@@ -94,7 +94,7 @@ class UDPAcceptor : public folly::AsyncUDPServerSocket::Callback {
     }
 
     StringPiece user = ToStringPiece(msg_.parsed_uri.user);
-    if (!user.removePrefix("+1"))
+    if (!(user.removePrefix("+1") || user.removePrefix("1")))
       return;
     uint64_t userPhone;
     if (auto result = folly::tryTo<uint64_t>(user)) {
