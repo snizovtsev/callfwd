@@ -1,0 +1,7 @@
+[Unit]
+Description=Call forwarder control socket
+
+[Socket]
+ListenDatagram=%t/callfwd
+SocketMode=0600
+RemoveOnStop=true
