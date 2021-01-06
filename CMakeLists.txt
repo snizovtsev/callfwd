@@ -8,6 +8,7 @@ find_package(Gflags REQUIRED MODULE)
 find_package(glog REQUIRED MODULE)
 find_package(proxygen REQUIRED)
 find_package(TBB REQUIRED)
+pkg_check_modules(SYSTEMD REQUIRED libsystemd)
 include(ProxygenTest)
 
 #set(CMAKE_CXX_STANDARD 14)

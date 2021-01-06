@@ -36,7 +36,7 @@ class PhoneMapping : public std::enable_shared_from_this<PhoneMapping> {
   PhoneMappingDumper makeDumper() const;
 
  protected:
-  PhoneMapping() noexcept = default;
+  static std::shared_ptr<PhoneMapping> detach(PhoneMapping &b);
   std::unordered_map<uint64_t, uint64_t> targetMapping_;
   std::vector<PhoneList> sourceNumbers_;
   std::vector<PhoneList> sortedTargets_;
@@ -48,4 +48,3 @@ class PhoneMappingBuilder : protected PhoneMapping {
   PhoneMappingBuilder& addMapping(uint64_t source, uint64_t target);
   std::shared_ptr<PhoneMapping> build();
 };
-

@@ -20,11 +20,6 @@ using folly::StringPiece;
 
 class TargetHandler final : public RequestHandler {
  public:
-  explicit TargetHandler(std::shared_ptr<PhoneMapping> db)
-    : db_(std::move(db))
-  {
-  }
-
   void onRequest(std::unique_ptr<HTTPMessage> req) noexcept override {
     if (req->getMethod() == HTTPMethod::GET) {
       onQueryString(req->getQueryStringAsStringPiece());
@@ -65,7 +60,7 @@ class TargetHandler final : public RequestHandler {
 
   void onQueryComplete() noexcept {
     for (uint64_t phone : query_) {
-      uint64_t target = db_->findTarget(phone);
+      uint64_t target = getPhoneMapping()->findTarget(phone);
       if (target != PhoneMapping::NONE)
         resp_.push_back(target);
       else
@@ -136,16 +131,10 @@ class TargetHandler final : public RequestHandler {
   std::unique_ptr<folly::IOBuf> body_;
   folly::small_vector<uint64_t, 16> query_;
   folly::small_vector<uint64_t, 16> resp_;
-  std::shared_ptr<PhoneMapping> db_;
 };
 
 class ReverseHandler final : public RequestHandler {
  public:
-  explicit ReverseHandler(std::shared_ptr<PhoneMapping> db)
-    : db_(std::move(db))
-  {
-  }
-
   void onRequest(std::unique_ptr<HTTPMessage> req) noexcept override {
     if (req->getMethod() != HTTPMethod::GET) {
       ResponseBuilder(downstream_)
@@ -160,7 +149,7 @@ class ReverseHandler final : public RequestHandler {
                                                 std::placeholders::_2));
 
     for (std::pair<uint64_t, uint64_t> range : query_) {
-      auto phones = db_->reverseTarget(range.first, range.second);
+      auto phones = getPhoneMapping()->reverseTarget(range.first, range.second);
       std::copy(phones.begin(), phones.end(), std::back_inserter(resp_));
     }
 
@@ -209,7 +198,6 @@ class ReverseHandler final : public RequestHandler {
   }
 
  private:
-  std::shared_ptr<PhoneMapping> db_;
   std::vector<std::pair<uint64_t, uint64_t>> query_;
   std::vector<uint64_t> resp_;
 };
@@ -226,9 +214,9 @@ class ApiHandlerFactory : public RequestHandlerFactory {
     const StringPiece path = msg->getPathAsStringPiece();
 
     if (path == "/target") {
-      return new TargetHandler(getPhoneMapping());
+      return new TargetHandler;
     } else if (path == "/reverse") {
-      return new ReverseHandler(getPhoneMapping());
+      return new ReverseHandler;
     }
 
     return new DirectResponseHandler(404, "Not found", "");

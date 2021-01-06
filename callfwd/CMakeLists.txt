@@ -10,8 +10,9 @@ set(SOURCES
 add_executable(callfwd ${SOURCES})
 target_link_libraries(callfwd
   proxygen::proxygenhttpserver
-  TBB::tbb
   osips_parser
+  TBB::tbb
+  ${SYSTEMD_LDFLAGS}
   )
 
 add_executable(sip-test SipTest.cpp)

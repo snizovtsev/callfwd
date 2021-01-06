@@ -6,5 +6,6 @@
 
 void loadMappingFile(const char* fname);
 std::shared_ptr<PhoneMapping> getPhoneMapping();
+void startControlSocket();
 
 #endif // CALLFWD_CONTROL_H

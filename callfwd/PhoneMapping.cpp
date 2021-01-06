@@ -61,6 +61,14 @@ void PhoneMappingBuilder::SizeHint(uint64_t numRecords)
   targetMapping_.reserve(numRecords);
 }
 
+std::shared_ptr<PhoneMapping> PhoneMapping::detach(PhoneMapping &b) {
+  auto ret = std::make_shared<PhoneMapping>();
+  ret->targetMapping_ = std::move(b.targetMapping_);
+  ret->sourceNumbers_ = std::move(b.sourceNumbers_);
+  ret->sortedTargets_ = std::move(b.sortedTargets_);
+  return ret;
+}
+
 std::shared_ptr<PhoneMapping> PhoneMappingBuilder::build()
 {
   size_t N = sourceNumbers_.size();
@@ -83,6 +91,5 @@ std::shared_ptr<PhoneMapping> PhoneMappingBuilder::build()
   sortedTargets_.erase(last, sortedTargets_.end());
   sortedTargets_.shrink_to_fit();
 
-  auto ret = std::make_shared<PhoneMappingBuilder>(std::move(*this));
-  return std::shared_ptr<PhoneMapping>(std::move(ret), ret.get());
+  return detach(*this);
 }

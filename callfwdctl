@@ -1,0 +1,17 @@
+#!/usr/bin/env python3
+
+import socket
+import array
+import sys
+
+
+def reload_db(s, path):
+    with open(path, "r") as f:
+        fd = f.fileno()
+        fds = array.array("i", [fd])
+        cmsg = (socket.SOL_SOCKET, socket.SCM_RIGHTS, fds)
+        s.sendmsg([b"LOAD_DB"], [cmsg])
+
+s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+s.connect("/var/run/user/1000/callfwd")
+reload_db(s, sys.argv[1])
