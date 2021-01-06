@@ -27,6 +27,7 @@ DEFINE_int32(threads, 0,
 
 std::unique_ptr<RequestHandlerFactory> makeApiHandlerFactory();
 std::unique_ptr<RequestHandlerFactory> makeSipHandlerFactory(std::vector<std::shared_ptr<folly::AsyncUDPServerSocket>> udpServer);
+std::unique_ptr<RequestHandlerFactory> makeAccessLogHandlerFactory();
 
 int main(int argc, char* argv[]) {
   gflags::ParseCommandLineFlags(&argc, &argv, true);
@@ -71,6 +72,7 @@ int main(int argc, char* argv[]) {
   options.receiveStreamWindowSize = uint32_t(1 << 20);
   options.receiveSessionWindowSize = 10 * (1 << 20);
   options.handlerFactories = RequestHandlerChain()
+    .addThen(makeAccessLogHandlerFactory())
     .addThen(makeApiHandlerFactory())
     .addThen(makeSipHandlerFactory(udpServer))
     .build();

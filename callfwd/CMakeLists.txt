@@ -3,6 +3,7 @@ set(SOURCES
   PhoneMapping.h
   ApiHandler.cpp
   SipHandler.cpp
+  AccessLogHandler.cpp
   Control.cpp
   CallFwd.cpp
   )
