@@ -3,15 +3,40 @@
 import socket
 import array
 import sys
+import os
+import tempfile
 
 
-def reload_db(s, path):
-    with open(path, "r") as f:
-        fd = f.fileno()
-        fds = array.array("i", [fd])
-        cmsg = (socket.SOL_SOCKET, socket.SCM_RIGHTS, fds)
-        s.sendmsg([b"LOAD_DB"], [cmsg])
+XDG_RUNTIME_DIR = os.getenv("XDG_RUNTIME_DIR")
+CALLFWD_SERVER_PATH = os.path.join(XDG_RUNTIME_DIR, "callfwd")
 
-s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-s.connect("/var/run/user/1000/callfwd")
-reload_db(s, sys.argv[1])
+class CallFwdControl(object):
+    def __init__(self, doorbell, server=None):
+        if server is None:
+            server = CALLFWD_SERVER_PATH
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        sock.bind(doorbell)
+        sock.connect(server)
+        self.sock = sock
+
+    def _make_request(self, cmd, fds):
+        cdata = array.array("i", [2] + fds)
+        cmsg = (socket.SOL_SOCKET, socket.SCM_RIGHTS, cdata)
+        self.sock.sendmsg([cmd], [cmsg])
+
+    def _wait_response(self):
+        msg,_,_,_ = self.sock.recvmsg(10)
+        print("Success" if msg == b'S' else 'Failure')
+        if msg != b'S':
+            exit(1)
+
+    def reload_db(self, new_db):
+        with open(new_db, "r") as f:
+            self._make_request(b"LOAD_DB", [f.fileno()])
+            self._wait_response()
+
+if __name__ == '__main__':
+    with tempfile.TemporaryDirectory('callfwdctl') as tmpdir:
+        doorbell = os.path.join(tmpdir, 'doorbell')
+        ctl = CallFwdControl(doorbell)
+        ctl.reload_db(sys.argv[1])

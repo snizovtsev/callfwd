@@ -3,9 +3,11 @@
 #include <systemd/sd-daemon.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <fstream>
 #include <functional>
 #include <thread>
+#include <glog/logging.h>
 #include <folly/concurrency/CoreCachedSharedPtr.h>
 #include <folly/portability/Unistd.h>
 #include <folly/portability/SysStat.h>
@@ -19,7 +21,7 @@ std::shared_ptr<PhoneMapping> getPhoneMapping()
   return currentMapping.get();
 }
 
-static void loadMappingFile(std::ifstream &in, PhoneMappingBuilder &builder)
+static bool loadMappingFile(std::ifstream &in, PhoneMappingBuilder &builder)
 {
   std::vector<char> rbuf(1ull << 19);
   std::string line;
@@ -34,7 +36,7 @@ static void loadMappingFile(std::ifstream &in, PhoneMappingBuilder &builder)
     } catch (std::runtime_error& e) {
       LOG(ERROR) << "Read failed on line " << nrows << ": " << e.what();
       in.close();
-      return;
+      return false;
     }
     row.clear();
     ++nrows;
@@ -43,16 +45,16 @@ static void loadMappingFile(std::ifstream &in, PhoneMappingBuilder &builder)
   if (!in.eof()) {
     in.close();
     LOG(ERROR) << "Read failed on line " << nrows;
-    return;
+    return false;
   }
   in.close();
 
   LOG(INFO) << "Building index (" << nrows << " rows)...";
-
   currentMapping.reset(builder.build());
+  return true;
 }
 
-static void loadMappingFile(int fd)
+static bool loadMappingFile(int fd)
 {
   PhoneMappingBuilder builder;
 
@@ -74,10 +76,10 @@ static void loadMappingFile(int fd)
   }
 
   LOG(INFO) << "Reloading database";
-  loadMappingFile(in, builder);
+  return loadMappingFile(in, builder);
 }
 
-void loadMappingFile(const char* fname)
+bool loadMappingFile(const char* fname)
 {
   PhoneMappingBuilder builder;
   std::ifstream in(fname);
@@ -95,10 +97,34 @@ void loadMappingFile(const char* fname)
   }
 
   LOG(INFO) << "Reading database from " << fname << " ...";
-  loadMappingFile(in, builder);
+  return loadMappingFile(in, builder);
 }
 
-static void controlThread(int fd) {
+class FdLogSink : public google::LogSink {
+public:
+  FdLogSink(int fd)
+    : fd_(fd)
+  {
+  }
+
+  ~FdLogSink() override = default;
+
+  void send(google::LogSeverity severity, const char* full_filename,
+            const char* base_filename, int line,
+            const struct ::tm* tm_time,
+            const char* message, size_t message_len) override
+  {
+    std::string buf = ToString(severity, base_filename, line,
+                               tm_time, message, message_len);
+    buf += '\n';
+    write(fd_, buf.data(), buf.size());
+  }
+
+private:
+  int fd_;
+};
+
+static void controlThread(int sock) {
   std::string pkt(1500, 'x');
   union {
       char buf[256];
@@ -108,17 +134,18 @@ static void controlThread(int fd) {
   struct iovec iov{pkt.data(), pkt.length()};
   struct msghdr msg;
   struct cmsghdr *c;
+  struct sockaddr_un peer;
 
   while (true) {
     msg.msg_iov = &iov;
     msg.msg_iovlen = 1;
-    msg.msg_name = NULL;
-    msg.msg_namelen = 0;
+    msg.msg_name = &peer;
+    msg.msg_namelen = sizeof(peer);
     msg.msg_flags = 0;
     msg.msg_control = u.buf;
     msg.msg_controllen = sizeof(u.buf);
 
-    ssize_t ret = recvmsg(fd, &msg, MSG_CMSG_CLOEXEC);
+    ssize_t ret = recvmsg(sock, &msg, MSG_CMSG_CLOEXEC);
     if (ret <= 0) {
       LOG(WARNING) << "Control socket error";
       continue;
@@ -137,12 +164,27 @@ static void controlThread(int fd) {
       }
     }
 
-    if (cmd == "LOAD_DB" && fds.size() == 1) {
-      loadMappingFile(fds[0]);
+    std::unique_ptr<google::LogSink> stderr;
+
+    if (fds.size() > 0) {
+      stderr.reset(new FdLogSink(fds[0]));
+      google::AddLogSink(stderr.get());
+    }
+
+    char success = 'F';
+    if (cmd == "LOAD_DB" && fds.size() == 2) {
+      if (loadMappingFile(fds[1]))
+        success = 'S';
     } else {
       LOG(WARNING) << "Unrecognized command: " << cmd << "(fds: " << fds.size() << ")";
     }
 
+    if (msg.msg_namelen > 0) {
+      if (sendto(sock, &success, 1, 0, (struct sockaddr*)&peer, msg.msg_namelen) < 0)
+        PLOG(WARNING) << "sendto";
+    }
+
+    google::RemoveLogSink(stderr.get());
     for (int fd : fds)
       close(fd);
   }

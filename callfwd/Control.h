@@ -4,7 +4,7 @@
 #include <memory>
 #include "PhoneMapping.h"
 
-void loadMappingFile(const char* fname);
+bool loadMappingFile(const char* fname);
 std::shared_ptr<PhoneMapping> getPhoneMapping();
 void startControlSocket();
 
