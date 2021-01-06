@@ -1,3 +1,4 @@
+#include <bits/stdint-uintn.h>
 #include <gflags/gflags.h>
 #include <glog/logging.h>
 #include <folly/io/async/EventBaseManager.h>
@@ -21,6 +22,8 @@ using folly::StringPiece;
 static StringPiece ToStringPiece(str s) {
   return StringPiece(s.s, s.len);
 }
+
+std::string formatTime(proxygen::TimePoint tp);
 
 class UDPAcceptor : public folly::AsyncUDPServerSocket::Callback {
  public:
@@ -47,6 +50,7 @@ class UDPAcceptor : public folly::AsyncUDPServerSocket::Callback {
     if (data->length() == 0)
       return;
 
+    auto startTime = proxygen::TimePoint::clock::now();
     memset(&msg_, 0, sizeof(msg_));
     msg_.buf = (char*) data->writableBuffer();
     msg_.len = data->length();
@@ -59,8 +63,9 @@ class UDPAcceptor : public folly::AsyncUDPServerSocket::Callback {
 
     if (msg_.first_line.type != SIP_REQUEST)
       return;
+    auto &req = msg_.first_line.u.request;
 
-    switch (msg_.first_line.u.request.method_value) {
+    switch (req.method_value) {
     case METHOD_OPTIONS:
       handleOptions(std::move(socket), client);
       break;
@@ -68,13 +73,20 @@ class UDPAcceptor : public folly::AsyncUDPServerSocket::Callback {
       handleInvite(std::move(socket), client);
       break;
     default:
-      return;
+      break;
     }
+
+    google::LogMessage("", 0).stream()
+      << client << " - - "
+      << "[" << formatTime(startTime) << "] \""
+      << ToStringPiece(req.method) << " " << ToStringPiece(req.uri) << "\" "
+      << status_ << " 0";
   }
 
   void handleOptions(std::shared_ptr<folly::AsyncUDPSocket> socket,
                      const folly::SocketAddress& client)
   {
+      status_ = 200;
       reply_.append("SIP/2.0 200 OK\r\n");
       copyHeader(msg_.h_via1);
       copyHeader(msg_.from);
@@ -103,6 +115,7 @@ class UDPAcceptor : public folly::AsyncUDPServerSocket::Callback {
       return;
     }
 
+    status_ = 302;
     reply_.append("SIP/2.0 302 Moved Temporarily\r\n");
     copyHeader(msg_.h_via1);
     copyHeader(msg_.from);
@@ -133,6 +146,7 @@ class UDPAcceptor : public folly::AsyncUDPServerSocket::Callback {
 
  private:
   folly::IOBufQueue reply_;
+  uint64_t status_;
   struct sip_msg msg_;
 };
 
