@@ -35,8 +35,24 @@ class CallFwdControl(object):
             self._make_request(b"LOAD_DB", [f.fileno()])
             self._wait_response()
 
+    def verify_db(self, backup_db):
+        with open(backup_db, "r") as f:
+            self._make_request(b"VERIFY_DB", [f.fileno()])
+            self._wait_response()
+
+    def dump_db(self, restored_db):
+        with open(restored_db, "w+") as f:
+            self._make_request(b"DUMP_DB", [f.fileno()])
+            self._wait_response()
+
+
 if __name__ == '__main__':
     with tempfile.TemporaryDirectory('callfwdctl') as tmpdir:
         doorbell = os.path.join(tmpdir, 'doorbell')
         ctl = CallFwdControl(doorbell)
-        ctl.reload_db(sys.argv[1])
+        if sys.argv[1] == 'reload':
+            ctl.reload_db(sys.argv[2])
+        elif sys.argv[1] == 'verify':
+            ctl.verify_db(sys.argv[2])
+        elif sys.argv[1] == 'dump':
+            ctl.dump_db(sys.argv[2])

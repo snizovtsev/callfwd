@@ -1,12 +1,12 @@
 #include "Control.h"
 
-#include <systemd/sd-daemon.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <fstream>
 #include <functional>
 #include <thread>
+#include <systemd/sd-daemon.h>
 #include <glog/logging.h>
 #include <folly/concurrency/CoreCachedSharedPtr.h>
 #include <folly/portability/Unistd.h>
@@ -100,6 +100,78 @@ bool loadMappingFile(const char* fname)
   return loadMappingFile(in, builder);
 }
 
+static bool verifyMappingFile(int fd)
+{
+  std::string fname = "/proc/self/fd/";
+  fname += folly::to<std::string>(fd);
+  std::ifstream in(fname);
+
+  CHECK(!in.fail());
+
+  LOG(INFO) << "Verifying database";
+  auto db = getPhoneMapping();
+  std::string line;
+  std::vector<uint64_t> row;
+  size_t nrows = 0;
+
+  while (getline(in, line)) {
+    try {
+      folly::splitTo<uint64_t>(",", line, std::back_inserter(row));
+    } catch (std::runtime_error& e) {
+      LOG(ERROR) << "Read failed on line " << nrows << ": " << e.what();
+      in.close();
+      return false;
+    }
+
+    if (db->findTarget(row[0]) != row[1]) {
+      LOG(ERROR) << (nrows+1) << ": key " << row[0] << " differs";
+    }
+
+    row.clear();
+    ++nrows;
+  }
+
+  if (!in.eof()) {
+    in.close();
+    LOG(ERROR) << "Read failed on line " << nrows;
+    return false;
+  }
+
+  if (nrows != db->size()) {
+    LOG(ERROR) << "Loaded DB has " << db->size() - nrows << " extra rows";
+    return false;
+  }
+
+  in.close();
+  return true;
+}
+
+static bool dumpMappingFile(int fd)
+{
+  std::string fname = "/proc/self/fd/";
+  fname += folly::to<std::string>(fd);
+  std::ofstream out(fname);
+
+  LOG(INFO) << "Dumping database";
+  size_t nrows = 0;
+  PhoneMappingDumper dumper(getPhoneMapping());
+
+  while (dumper.hasNext()) {
+    out << dumper.currentSource() << "," << dumper.currentTarget() << "\r\n";
+    dumper.moveNext();
+  }
+
+  out.flush();
+  if (out.fail()) {
+    out.close();
+    LOG(ERROR) << "Write failed on line " << nrows;
+    return false;
+  }
+
+  out.close();
+  return true;
+}
+
 class FdLogSink : public google::LogSink {
 public:
   FdLogSink(int fd)
@@ -174,6 +246,12 @@ static void controlThread(int sock) {
     char success = 'F';
     if (cmd == "LOAD_DB" && fds.size() == 2) {
       if (loadMappingFile(fds[1]))
+        success = 'S';
+    } else if (cmd == "VERIFY_DB" && fds.size() == 2) {
+      if (verifyMappingFile(fds[1]))
+        success = 'S';
+    } else if (cmd == "DUMP_DB" && fds.size() == 2) {
+      if (dumpMappingFile(fds[1]))
         success = 'S';
     } else {
       LOG(WARNING) << "Unrecognized command: " << cmd << "(fds: " << fds.size() << ")";

@@ -11,19 +11,6 @@ struct PhoneList {
   PhoneList *next;
 };
 
-class PhoneMappingDumper {
- public:
-  uint64_t currentSource() const;
-  uint64_t currentTarget() const;
-
-  bool hasNext() const;
-  void moveNext();
-
- private:
-  friend class PhoneMapping;
-  std::shared_ptr<std::vector<PhoneList>::const_iterator> sourceNumbersIter_;
-};
-
 class PhoneMapping : public std::enable_shared_from_this<PhoneMapping> {
  public:
   enum {
@@ -33,9 +20,9 @@ class PhoneMapping : public std::enable_shared_from_this<PhoneMapping> {
   size_t size() const { return sourceNumbers_.size(); }
   uint64_t findTarget(uint64_t source) const;
   std::vector<uint64_t> reverseTarget(uint64_t targetMin, uint64_t targetMax) const;
-  PhoneMappingDumper makeDumper() const;
 
  protected:
+  friend class PhoneMappingDumper;
   static std::shared_ptr<PhoneMapping> detach(PhoneMapping &b);
   std::unordered_map<uint64_t, uint64_t> targetMapping_;
   std::vector<PhoneList> sourceNumbers_;
@@ -47,4 +34,28 @@ class PhoneMappingBuilder : protected PhoneMapping {
   void SizeHint(uint64_t numRecords);
   PhoneMappingBuilder& addMapping(uint64_t source, uint64_t target);
   std::shared_ptr<PhoneMapping> build();
+};
+
+class PhoneMappingDumper {
+ public:
+  PhoneMappingDumper(std::shared_ptr<PhoneMapping> db)
+    : db_(std::move(db))
+    , rowIter_(db_->sourceNumbers_.cbegin())
+  {
+  }
+
+  uint64_t currentSource() const {
+    return rowIter_->phone;
+  }
+
+  uint64_t currentTarget() const {
+    return db_->findTarget(currentSource());
+  }
+
+  bool hasNext() const { return rowIter_ != db_->sourceNumbers_.cend(); }
+  void moveNext() { ++rowIter_; }
+
+ private:
+  std::shared_ptr<PhoneMapping> db_;
+  std::vector<PhoneList>::const_iterator rowIter_;
 };
