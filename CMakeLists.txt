@@ -20,5 +20,4 @@ endif()
 
 include_directories(${CMAKE_SOURCE_DIR})
 add_subdirectory(lib)
-add_subdirectory(echo)
 add_subdirectory(callfwd)
