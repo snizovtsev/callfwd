@@ -8,17 +8,17 @@
 #include <thread>
 #include <systemd/sd-daemon.h>
 #include <glog/logging.h>
-#include <folly/concurrency/CoreCachedSharedPtr.h>
+#include <folly/Synchronized.h>
 #include <folly/portability/Unistd.h>
 #include <folly/portability/SysStat.h>
 #include <folly/String.h>
 #include <folly/Conv.h>
 
-static folly::AtomicCoreCachedSharedPtr<PhoneMapping> currentMapping;
+folly::Synchronized<std::shared_ptr<PhoneMapping>> currentMapping;
 
 std::shared_ptr<PhoneMapping> getPhoneMapping()
 {
-  return currentMapping.get();
+  return currentMapping.copy();
 }
 
 static bool loadMappingFile(std::ifstream &in, PhoneMappingBuilder &builder)
@@ -50,7 +50,7 @@ static bool loadMappingFile(std::ifstream &in, PhoneMappingBuilder &builder)
   in.close();
 
   LOG(INFO) << "Building index (" << nrows << " rows)...";
-  currentMapping.reset(builder.build());
+  currentMapping.exchange(builder.build());
   return true;
 }
 
@@ -269,7 +269,10 @@ static void controlThread(int sock) {
 }
 
 void startControlSocket() {
-  CHECK(sd_listen_fds(0) == 1) << "callfwd should be launched using systemd";
+  if (sd_listen_fds(0) != 1) {
+    LOG(WARNING) << "launched without systemd, control socket disabled";
+    return;
+  }
   int fd = SD_LISTEN_FDS_START + 0;
   std::thread(std::bind(controlThread, fd)).detach();
 }

@@ -5,6 +5,7 @@
 #if HAVE_STD_PARALLEL
 #include <execution>
 #endif
+#include <glog/logging.h>
 
 static inline bool operator< (const PhoneList &lhs, const PhoneList &rhs) {
   return std::tie(lhs.phone, lhs.next) < std::tie(rhs.phone, rhs.next);
@@ -12,6 +13,11 @@ static inline bool operator< (const PhoneList &lhs, const PhoneList &rhs) {
 
 static inline bool operator== (const PhoneList &lhs, const PhoneList &rhs) {
   return lhs.phone == rhs.phone;
+}
+
+PhoneMapping::~PhoneMapping() noexcept
+{
+  LOG_IF(INFO, size() > 0) << "Reclaiming memory";
 }
 
 uint64_t PhoneMapping::findTarget(uint64_t source) const
@@ -62,10 +68,10 @@ void PhoneMappingBuilder::SizeHint(uint64_t numRecords)
 }
 
 std::shared_ptr<PhoneMapping> PhoneMapping::detach(PhoneMapping &b) {
-  auto ret = std::make_shared<PhoneMapping>();
-  ret->targetMapping_ = std::move(b.targetMapping_);
-  ret->sourceNumbers_ = std::move(b.sourceNumbers_);
-  ret->sortedTargets_ = std::move(b.sortedTargets_);
+  std::shared_ptr<PhoneMapping> ret(new PhoneMapping);
+  std::swap(ret->targetMapping_, b.targetMapping_);
+  std::swap(ret->sourceNumbers_, b.sourceNumbers_);
+  std::swap(ret->sortedTargets_, b.sortedTargets_);
   return ret;
 }
 

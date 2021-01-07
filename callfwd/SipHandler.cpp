@@ -1,4 +1,3 @@
-#include <bits/stdint-uintn.h>
 #include <gflags/gflags.h>
 #include <glog/logging.h>
 #include <folly/io/async/EventBaseManager.h>

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <unordered_map>
+#include <folly/container/F14Map.h>
 #include <vector>
 #include <cstdint>
 #include <memory>
@@ -11,11 +12,13 @@ struct PhoneList {
   PhoneList *next;
 };
 
-class PhoneMapping : public std::enable_shared_from_this<PhoneMapping> {
+class PhoneMapping {
  public:
   enum {
     NONE = std::numeric_limits<uint64_t>::max(),
   };
+
+  ~PhoneMapping() noexcept;
 
   size_t size() const { return sourceNumbers_.size(); }
   uint64_t findTarget(uint64_t source) const;
@@ -24,7 +27,8 @@ class PhoneMapping : public std::enable_shared_from_this<PhoneMapping> {
  protected:
   friend class PhoneMappingDumper;
   static std::shared_ptr<PhoneMapping> detach(PhoneMapping &b);
-  std::unordered_map<uint64_t, uint64_t> targetMapping_;
+  //std::unordered_map<uint64_t, uint64_t> targetMapping_;
+  folly::F14ValueMap<uint64_t, uint64_t> targetMapping_;
   std::vector<PhoneList> sourceNumbers_;
   std::vector<PhoneList> sortedTargets_;
 };
