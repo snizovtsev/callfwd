@@ -66,7 +66,7 @@ class UDPAcceptor : public folly::AsyncUDPServerSocket::Callback {
 
     switch (req.method_value) {
     case METHOD_OPTIONS:
-      handleOptions(std::move(socket), client);
+      replyOptions(std::move(socket), client);
       break;
     case METHOD_INVITE:
       handleInvite(std::move(socket), client);
@@ -82,8 +82,8 @@ class UDPAcceptor : public folly::AsyncUDPServerSocket::Callback {
       << status_ << " 0";
   }
 
-  void handleOptions(std::shared_ptr<folly::AsyncUDPSocket> socket,
-                     const folly::SocketAddress& client)
+  void replyOptions(std::shared_ptr<folly::AsyncUDPSocket> socket,
+                    const folly::SocketAddress& client)
   {
       status_ = 200;
       reply_.append("SIP/2.0 200 OK\r\n");
@@ -96,9 +96,43 @@ class UDPAcceptor : public folly::AsyncUDPServerSocket::Callback {
       socket->write(client, reply_.move());
   }
 
+  void replyTooManyReq(std::shared_ptr<folly::AsyncUDPSocket> socket,
+                      const folly::SocketAddress& client)
+  {
+      status_ = 429;
+      reply_.append("SIP/2.0 429 Too Many Requests\r\n");
+      copyHeader(msg_.h_via1);
+      copyHeader(msg_.from);
+      copyHeader(msg_.to);
+      copyHeader(msg_.callid);
+      copyHeader(msg_.cseq);
+      reply_.append("Content-Length: 0\r\n\r\n");
+      socket->write(client, reply_.move());
+  }
+
+  void replyUnauthorized(std::shared_ptr<folly::AsyncUDPSocket> socket,
+                        const folly::SocketAddress& client)
+  {
+      status_ = 401;
+      reply_.append("SIP/2.0 401 Unauthorized\r\n");
+      copyHeader(msg_.h_via1);
+      copyHeader(msg_.from);
+      copyHeader(msg_.to);
+      copyHeader(msg_.callid);
+      copyHeader(msg_.cseq);
+      reply_.append("Content-Length: 0\r\n\r\n");
+      socket->write(client, reply_.move());
+  }
+
   void handleInvite(std::shared_ptr<folly::AsyncUDPSocket> socket,
                     const folly::SocketAddress& client)
   {
+    switch (checkACL(client.getIPAddress())) {
+    case 429: return replyTooManyReq(std::move(socket), client);
+    case 401: return replyUnauthorized(std::move(socket), client);
+    default: break;
+    }
+
     if (parse_sip_msg_uri(&msg_) != 0) {
       LOG(INFO) << "Failed to parse SIP URI";
       return;

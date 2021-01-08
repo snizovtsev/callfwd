@@ -45,6 +45,11 @@ class CallFwdControl(object):
             self._make_request(b"DUMP_DB", [f.fileno()])
             self._wait_response()
 
+    def reload_acl(self, acl):
+        with open(acl, "r") as f:
+            self._make_request(b"LOAD_ACL", [f.fileno()])
+            self._wait_response()
+
 
 if __name__ == '__main__':
     with tempfile.TemporaryDirectory('callfwdctl') as tmpdir:
@@ -56,3 +61,5 @@ if __name__ == '__main__':
             ctl.verify_db(sys.argv[2])
         elif sys.argv[1] == 'dump':
             ctl.dump_db(sys.argv[2])
+        elif sys.argv[1] == 'acl':
+            ctl.reload_acl(sys.argv[2])
