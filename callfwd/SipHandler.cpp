@@ -46,6 +46,7 @@ class UDPAcceptor : public folly::AsyncUDPServerSocket::Callback {
       bool /*unused*/,
       OnDataAvailableParams /*unused*/) noexcept override
   {
+    status_ = 0;
     if (data->length() == 0)
       return;
 
@@ -75,11 +76,13 @@ class UDPAcceptor : public folly::AsyncUDPServerSocket::Callback {
       break;
     }
 
-    google::LogMessage("", 0).stream()
-      << client << " - - "
-      << "[" << formatTime(startTime) << "] \""
-      << ToStringPiece(req.method) << " " << ToStringPiece(req.uri) << "\" "
-      << status_ << " 0";
+    if (VLOG_IS_ON(1)) {
+      google::LogMessage("", 0).stream()
+        << client << " - - "
+        << "[" << formatTime(startTime) << "] \""
+        << ToStringPiece(req.method) << " " << ToStringPiece(req.uri) << "\" "
+        << status_ << " 0";
+    }
   }
 
   void replyOptions(std::shared_ptr<folly::AsyncUDPSocket> socket,
