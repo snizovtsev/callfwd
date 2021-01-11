@@ -34,7 +34,7 @@ class UDPAcceptor : public folly::AsyncUDPServerSocket::Callback {
     if (hdr) {
       reply_.append(ToStringPiece(hdr->name));
       reply_.append(": ");
-      reply_.append(ToStringPiece(hdr->body));
+      reply_.append(rtrimWhitespace(ToStringPiece(hdr->body)));
       reply_.append("\r\n");
     }
   }
@@ -67,7 +67,7 @@ class UDPAcceptor : public folly::AsyncUDPServerSocket::Callback {
 
     switch (req.method_value) {
     case METHOD_OPTIONS:
-      replyOptions(std::move(socket), client);
+      replyWithStatus(200, "OK", std::move(socket), client);
       break;
     case METHOD_INVITE:
       handleInvite(std::move(socket), client);
@@ -85,54 +85,31 @@ class UDPAcceptor : public folly::AsyncUDPServerSocket::Callback {
     }
   }
 
-  void replyOptions(std::shared_ptr<folly::AsyncUDPSocket> socket,
-                    const folly::SocketAddress& client)
+  void replyWithStatus(uint64_t status, StringPiece message,
+                       std::shared_ptr<folly::AsyncUDPSocket> socket,
+                       const folly::SocketAddress& client)
   {
-      status_ = 200;
-      reply_.append("SIP/2.0 200 OK\r\n");
+      status_ = status;
+      reply_.append("SIP/2.0 ");
+      reply_.append(folly::to<std::string>(status));
+      reply_.append(" ");
+      reply_.append(message);
+      reply_.append("OK\r\n");
       copyHeader(msg_.h_via1);
       copyHeader(msg_.from);
       copyHeader(msg_.to);
       copyHeader(msg_.callid);
       copyHeader(msg_.cseq);
       reply_.append("Content-Length: 0\r\n\r\n");
-      socket->write(client, reply_.move());
-  }
-
-  void replyTooManyReq(std::shared_ptr<folly::AsyncUDPSocket> socket,
-                      const folly::SocketAddress& client)
-  {
-      status_ = 429;
-      reply_.append("SIP/2.0 429 Too Many Requests\r\n");
-      copyHeader(msg_.h_via1);
-      copyHeader(msg_.from);
-      copyHeader(msg_.to);
-      copyHeader(msg_.callid);
-      copyHeader(msg_.cseq);
-      reply_.append("Content-Length: 0\r\n\r\n");
-      socket->write(client, reply_.move());
-  }
-
-  void replyUnauthorized(std::shared_ptr<folly::AsyncUDPSocket> socket,
-                        const folly::SocketAddress& client)
-  {
-      status_ = 401;
-      reply_.append("SIP/2.0 401 Unauthorized\r\n");
-      copyHeader(msg_.h_via1);
-      copyHeader(msg_.from);
-      copyHeader(msg_.to);
-      copyHeader(msg_.callid);
-      copyHeader(msg_.cseq);
-      reply_.append("Content-Length: 0\r\n\r\n");
-      socket->write(client, reply_.move());
+      socket->writeChain(client, reply_.move(), {});
   }
 
   void handleInvite(std::shared_ptr<folly::AsyncUDPSocket> socket,
                     const folly::SocketAddress& client)
   {
     switch (checkACL(client.getIPAddress())) {
-    case 429: return replyTooManyReq(std::move(socket), client);
-    case 401: return replyUnauthorized(std::move(socket), client);
+    case 429: return replyWithStatus(429, "Too Many Requests", std::move(socket), client);
+    case 401: return replyWithStatus(401, "Unauthorized", std::move(socket), client);
     default: break;
     }
 
@@ -177,7 +154,7 @@ class UDPAcceptor : public folly::AsyncUDPServerSocket::Callback {
     reply_.append(">\r\n"
                   "Location-Info: N\r\n"
                   "Content-Length: 0\r\n\r\n");
-    socket->write(client, reply_.move());
+    socket->writeChain(client, reply_.move(), {});
   }
 
  private:
