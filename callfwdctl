@@ -9,6 +9,7 @@ import tempfile
 
 XDG_RUNTIME_DIR = os.getenv("XDG_RUNTIME_DIR")
 CALLFWD_SERVER_PATH = os.path.join(XDG_RUNTIME_DIR, "callfwd")
+CALLFWD_SERVER_PATH = "/run/callfwd"
 
 class CallFwdControl(object):
     def __init__(self, doorbell, server=None):

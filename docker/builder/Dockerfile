@@ -10,6 +10,7 @@ RUN yum install -y devtoolset-9-toolchain cmake3 \
 
 RUN yum install -y libsodium-devel zlib-devel openssl-devel jemalloc-devel \
         libevent-devel double-conversion-devel libzstd-devel libicu-devel \
+        systemd-devel \
     && yum clean all && rm -rf /var/cache/yum
 
 ENV TBB_VERSION=20191006oss
