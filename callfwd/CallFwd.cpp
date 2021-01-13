@@ -1,5 +1,6 @@
 #include <folly/Memory.h>
 #include <folly/io/async/EventBaseManager.h>
+#include <folly/io/async/AsyncUDPSocket.h>
 #include <folly/portability/GFlags.h>
 #include <folly/system/HardwareConcurrency.h>
 #include <proxygen/httpserver/HTTPServer.h>
@@ -26,7 +27,7 @@ DEFINE_int32(threads, 0,
              "will use the number of cores on this machine.");
 
 std::unique_ptr<RequestHandlerFactory> makeApiHandlerFactory();
-std::unique_ptr<RequestHandlerFactory> makeSipHandlerFactory(std::vector<std::shared_ptr<folly::AsyncUDPServerSocket>> udpServer);
+std::unique_ptr<RequestHandlerFactory> makeSipHandlerFactory(std::vector<std::shared_ptr<folly::AsyncUDPSocket>> socket);
 std::unique_ptr<RequestHandlerFactory> makeAccessLogHandlerFactory();
 
 int main(int argc, char* argv[]) {
@@ -45,16 +46,17 @@ int main(int argc, char* argv[]) {
   std::vector<HTTPServer::IPConfig> IPs;
   for (std::string intf : {FLAGS_http_if1, FLAGS_http_if2, FLAGS_http_if3}) {
     if (!intf.empty()) {
-      IPs.emplace_back(folly::SocketAddress{intf, FLAGS_http_port, true},
+      uint16_t port = FLAGS_http_port;
+      IPs.emplace_back(folly::SocketAddress{intf, port, true},
                        HTTPServer::Protocol::HTTP);
     }
   }
 
-  std::vector<std::shared_ptr<folly::AsyncUDPServerSocket>> udpServer;
+  std::vector<std::shared_ptr<folly::AsyncUDPSocket>> udpServer;
   folly::EventBase* evb = folly::EventBaseManager::get()->getEventBase();
   for (std::string intf : {FLAGS_sip_if1, FLAGS_sip_if2, FLAGS_sip_if3, FLAGS_sip_if4}) {
     if (!intf.empty()) {
-      auto socket = std::make_shared<folly::AsyncUDPServerSocket>(evb);
+      auto socket = std::make_shared<folly::AsyncUDPSocket>(evb);
       socket->bind(folly::SocketAddress(intf, FLAGS_sip_port));
       LOG(INFO) << "SIP listening on " << socket->address().describe();
       udpServer.push_back(std::move(socket));
@@ -84,8 +86,9 @@ int main(int argc, char* argv[]) {
   loadMappingFile(argv[1]);
 
   LOG(INFO) << "Serving requests";
-  for (auto socket : udpServer)
-    socket->listen();
   server.start();
+  for (auto& sock : udpServer) {
+    sock->close();
+  }
   return 0;
 }

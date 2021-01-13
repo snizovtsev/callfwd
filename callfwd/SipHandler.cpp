@@ -1,7 +1,7 @@
 #include <gflags/gflags.h>
 #include <glog/logging.h>
 #include <folly/io/async/EventBaseManager.h>
-#include <folly/io/async/AsyncUDPServerSocket.h>
+#include <folly/io/async/AsyncUDPSocket.h>
 #include <folly/io/IOBufQueue.h>
 #include <proxygen/httpserver/RequestHandlerFactory.h>
 #include "PhoneMapping.h"
@@ -15,8 +15,10 @@ extern "C" {
 
 using proxygen::RequestHandlerFactory;
 using proxygen::RequestHandler;
-using proxygen::HTTPMessage;
 using folly::StringPiece;
+using folly::NetworkSocket;
+using folly::AsyncUDPSocket;
+using folly::EventBase;
 
 static StringPiece ToStringPiece(str s) {
   return StringPiece(s.s, s.len);
@@ -24,11 +26,15 @@ static StringPiece ToStringPiece(str s) {
 
 std::string formatTime(proxygen::TimePoint tp);
 
-class UDPAcceptor : public folly::AsyncUDPServerSocket::Callback {
+class SIPHandler : public AsyncUDPSocket::ReadCallback {
  public:
-  void onListenStarted() noexcept override {}
-
-  void onListenStopped() noexcept override {}
+  explicit SIPHandler(EventBase *evb, NetworkSocket sockfd)
+    : socket_(evb)
+    , recvbuf_(1500)
+  {
+    socket_.setFD(sockfd, AsyncUDPSocket::FDOwnership::SHARED);
+    socket_.resumeRead(this);
+  }
 
   void copyHeader(const struct hdr_field* hdr) {
     if (hdr) {
@@ -39,23 +45,35 @@ class UDPAcceptor : public folly::AsyncUDPServerSocket::Callback {
     }
   }
 
+  void getReadBuffer(void** buf, size_t* len) noexcept override {
+    *buf = recvbuf_.data();
+    *len = recvbuf_.size();
+  }
+
+  void onReadError(const folly::AsyncSocketException& ex) noexcept override {
+    LOG(ERROR) << ex.what();
+    socket_.resumeRead(this);
+  }
+
+  void onReadClosed() noexcept override {
+    delete this;
+  }
+
   void onDataAvailable(
-      std::shared_ptr<folly::AsyncUDPSocket> socket,
       const folly::SocketAddress& client,
-      std::unique_ptr<folly::IOBuf> data,
-      bool /*unused*/,
-      OnDataAvailableParams /*unused*/) noexcept override
+      size_t len, bool /*truncated*/,
+      OnDataAvailableParams /*params*/) noexcept override
   {
-    status_ = 0;
-    if (data->length() == 0)
+    if (len == 0)
       return;
 
-    auto startTime = proxygen::TimePoint::clock::now();
+    status_ = 0;
     memset(&msg_, 0, sizeof(msg_));
-    msg_.buf = (char*) data->writableBuffer();
-    msg_.len = data->length();
+    msg_.buf = recvbuf_.data();
+    msg_.len = len;
     reply_.clear();
 
+    auto startTime = proxygen::TimePoint::clock::now();
     if (parse_msg(msg_.buf, msg_.len, &msg_) != 0) {
       LOG(INFO) << "Failed to parse SIP message";
       return;
@@ -67,10 +85,10 @@ class UDPAcceptor : public folly::AsyncUDPServerSocket::Callback {
 
     switch (req.method_value) {
     case METHOD_OPTIONS:
-      replyWithStatus(200, "OK", std::move(socket), client);
+      replyWithStatus(200, "OK", client);
       break;
     case METHOD_INVITE:
-      handleInvite(std::move(socket), client);
+      handleInvite(client);
       break;
     default:
       break;
@@ -80,13 +98,13 @@ class UDPAcceptor : public folly::AsyncUDPServerSocket::Callback {
       google::LogMessage("", 0).stream()
         << client << " - - "
         << "[" << formatTime(startTime) << "] \""
-        << ToStringPiece(req.method) << " " << ToStringPiece(req.uri) << "\" "
+        << ToStringPiece(req.method) << " "
+        << ToStringPiece(req.uri) << "\" "
         << status_ << " 0";
     }
   }
 
   void replyWithStatus(uint64_t status, StringPiece message,
-                       std::shared_ptr<folly::AsyncUDPSocket> socket,
                        const folly::SocketAddress& client)
   {
       status_ = status;
@@ -94,22 +112,21 @@ class UDPAcceptor : public folly::AsyncUDPServerSocket::Callback {
       reply_.append(folly::to<std::string>(status));
       reply_.append(" ");
       reply_.append(message);
-      reply_.append("OK\r\n");
+      reply_.append("\r\n");
       copyHeader(msg_.h_via1);
       copyHeader(msg_.from);
       copyHeader(msg_.to);
       copyHeader(msg_.callid);
       copyHeader(msg_.cseq);
       reply_.append("Content-Length: 0\r\n\r\n");
-      socket->writeChain(client, reply_.move(), {});
+      socket_.writeChain(client, reply_.move(), {});
   }
 
-  void handleInvite(std::shared_ptr<folly::AsyncUDPSocket> socket,
-                    const folly::SocketAddress& client)
+  void handleInvite(const folly::SocketAddress& client)
   {
     switch (checkACL(client.getIPAddress())) {
-    case 429: return replyWithStatus(429, "Too Many Requests", std::move(socket), client);
-    case 401: return replyWithStatus(401, "Unauthorized", std::move(socket), client);
+    case 429: return replyWithStatus(429, "Too Many Requests", client);
+    case 401: return replyWithStatus(401, "Unauthorized", client);
     default: break;
     }
 
@@ -154,42 +171,47 @@ class UDPAcceptor : public folly::AsyncUDPServerSocket::Callback {
     reply_.append(">\r\n"
                   "Location-Info: N\r\n"
                   "Content-Length: 0\r\n\r\n");
-    socket->writeChain(client, reply_.move(), {});
+    socket_.writeChain(client, reply_.move(), {});
   }
 
  private:
+  folly::AsyncUDPSocket socket_;
+  std::vector<char> recvbuf_;
   folly::IOBufQueue reply_;
+
   uint64_t status_;
   struct sip_msg msg_;
 };
 
-class SipHandlerFactory : public proxygen::RequestHandlerFactory {
+class SipHandlerFactory : public RequestHandlerFactory {
  public:
-  explicit SipHandlerFactory(std::vector<std::shared_ptr<folly::AsyncUDPServerSocket>> udpServer)
+  explicit SipHandlerFactory(std::vector<std::shared_ptr<AsyncUDPSocket>> udpServer)
     : server_(std::move(udpServer))
   {
   }
 
   void onServerStart(folly::EventBase* evb) noexcept override {
     // Add UDP handler here
-    for (auto socket : server_)
-      socket->addListener(evb, new UDPAcceptor);
+    for (auto socket : server_) {
+      new SIPHandler(evb, socket->getNetworkSocket());
+      //socket->addListener(evb, new SIPHandler);
+    }
   }
 
   void onServerStop() noexcept override {
     // Stop UDP handler
   }
 
-  RequestHandler* onRequest(RequestHandler *upstream, HTTPMessage *msg) noexcept override {
+  RequestHandler* onRequest(RequestHandler *upstream, proxygen::HTTPMessage*) noexcept override {
     return upstream;
   }
 
  private:
-  std::vector<std::shared_ptr<folly::AsyncUDPServerSocket>> server_;
+  std::vector<std::shared_ptr<AsyncUDPSocket>> server_;
 };
 
 
-std::unique_ptr<RequestHandlerFactory> makeSipHandlerFactory(std::vector<std::shared_ptr<folly::AsyncUDPServerSocket>> udpServer)
+std::unique_ptr<RequestHandlerFactory> makeSipHandlerFactory(std::vector<std::shared_ptr<AsyncUDPSocket>> udpServer)
 {
   return std::make_unique<SipHandlerFactory>(std::move(udpServer));
 }
