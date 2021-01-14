@@ -7,16 +7,16 @@
 #include <proxygen/httpserver/RequestHandlerFactory.h>
 #include <proxygen/httpserver/ResponseBuilder.h>
 #include <proxygen/httpserver/filters/DirectResponseHandler.h>
-#include "PhoneMapping.h"
-#include "Control.h"
 
+#include "PhoneMapping.h"
+#include "CallFwd.h"
+
+using namespace proxygen;
+using folly::StringPiece;
 
 DEFINE_uint32(max_query_length, 32768,
               "Maximum length of POST x-www-form-urlencoded body");
 
-
-using namespace proxygen;
-using folly::StringPiece;
 
 class TargetHandler final : public RequestHandler {
  public:

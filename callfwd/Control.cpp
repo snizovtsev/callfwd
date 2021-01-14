@@ -1,5 +1,3 @@
-#include "Control.h"
-
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -9,15 +7,20 @@
 #include <thread>
 #include <iomanip>
 #include <systemd/sd-daemon.h>
+#include <systemd/sd-journal.h>
 #include <glog/logging.h>
 #include <folly/Synchronized.h>
 #include <folly/portability/Unistd.h>
 #include <folly/portability/SysStat.h>
+#include <folly/system/ThreadId.h>
 #include <folly/String.h>
 #include <folly/Conv.h>
 #include <folly/TokenBucket.h>
 #include <folly/IPAddress.h>
 #include <proxygen/lib/utils/Time.h>
+
+#include "CallFwd.h"
+#include "PhoneMapping.h"
 
 using proxygen::SystemTimePoint;
 
@@ -293,6 +296,25 @@ private:
   int fd_;
 };
 
+class JournaldSink : public google::LogSink {
+public:
+  void send(google::LogSeverity severity, const char* full_filename,
+            const char* base_filename, int line,
+            const struct ::tm* tm_time,
+            const char* message, size_t message_len) override
+  {
+    // This array maps Google severity levels to syslog levels
+    const int SEVERITY_TO_LEVEL[] = { LOG_INFO, LOG_WARNING, LOG_ERR, LOG_EMERG };
+
+    sd_journal_send("MESSAGE=%.*s", int(message_len), message,
+                    "PRIORITY=%i", SEVERITY_TO_LEVEL[static_cast<int>(severity)],
+                    "TID=%i", int(folly::getOSThreadID()),
+                    "CODE_FILE=%s", full_filename,
+                    "CODE_LINE=%d", line,
+                    NULL);
+  }
+};
+
 static void controlThread(int sock) {
   std::string pkt(1500, 'x');
   union {
@@ -369,10 +391,12 @@ static void controlThread(int sock) {
 }
 
 void startControlSocket() {
+  static JournaldSink journalSink;
   if (sd_listen_fds(0) != 1) {
     LOG(WARNING) << "launched without systemd, control socket disabled";
     return;
   }
+  google::AddLogSink(&journalSink);
   int fd = SD_LISTEN_FDS_START + 0;
   std::thread(std::bind(controlThread, fd)).detach();
 }

@@ -3,10 +3,11 @@
 #include <folly/portability/GFlags.h>
 #include <folly/io/async/AsyncUDPSocket.h>
 #include <folly/io/IOBufQueue.h>
+#include <folly/logging/AsyncLogWriter.h>
 #include <proxygen/httpserver/RequestHandlerFactory.h>
 
+#include "CallFwd.h"
 #include "PhoneMapping.h"
-#include "Control.h"
 
 extern "C" {
 #include <lib/osips_parser/msg_parser.h>
@@ -22,19 +23,15 @@ using folly::SocketAddress;
 using folly::AsyncUDPSocket;
 using folly::EventBase;
 
-DEFINE_uint32(sip_max_length, 1500,
-              "Maximum length of a SIP payload");
+DEFINE_uint32(sip_max_length, 1500, "Maximum length of a SIP payload");
 
-std::string formatTime(TimePoint tp); // FIXME
-
-inline StringPiece ToStringPiece(str s) {
-  return StringPiece(s.s, s.len);
-}
+inline StringPiece SP(str s) { return StringPiece(s.s, s.len); }
 
 class SIPHandler : public AsyncUDPSocket::ReadCallback {
  public:
-  explicit SIPHandler(EventBase *evb, NetworkSocket sockfd)
+  explicit SIPHandler(EventBase *evb, NetworkSocket sockfd, AccessLogFormatter log)
     : socket_(evb)
+    , log_(std::move(log))
     , recvbuf_(FLAGS_sip_max_length)
   {
     socket_.setFD(sockfd, AsyncUDPSocket::FDOwnership::SHARED);
@@ -68,6 +65,9 @@ class SIPHandler : public AsyncUDPSocket::ReadCallback {
       finishWithError();
       return;
     }
+
+    log_.onRequest(peer_, SP(REQ_LINE(&msg_).method), SP(REQ_LINE(&msg_).uri),
+                   proxygen::toTimeT(recvtime_));
 
     switch (msg_.REQ_METHOD) {
     case METHOD_OPTIONS:
@@ -110,7 +110,7 @@ class SIPHandler : public AsyncUDPSocket::ReadCallback {
       return;
     }
 
-    StringPiece user = ToStringPiece(msg_.parsed_uri.user);
+    StringPiece user = SP(msg_.parsed_uri.user);
     if (!(user.removePrefix("+1") || user.removePrefix("1"))) {
       finishWithError();
       return;
@@ -131,8 +131,8 @@ class SIPHandler : public AsyncUDPSocket::ReadCallback {
     target += folly::to<std::string>(targetPhone);
 
     reply(302, "Moved Temporarily");
-    StringPiece host = ToStringPiece(msg_.parsed_uri.host);
-    StringPiece port = ToStringPiece(msg_.parsed_uri.port);
+    StringPiece host = SP(msg_.parsed_uri.host);
+    StringPiece port = SP(msg_.parsed_uri.port);
     output("Contact: <sip:+1{};rn={};ndpi@{}:{}>\r\n",
            user, target, host, port);
     output("Location-Info: N\r\n");
@@ -158,8 +158,8 @@ class SIPHandler : public AsyncUDPSocket::ReadCallback {
 
   void outputHeader(const struct hdr_field* hdr) {
     if (hdr) {
-      output("{}: {}\r\n", ToStringPiece(hdr->name),
-             rtrimWhitespace(ToStringPiece(hdr->body)));
+      output("{}: {}\r\n", SP(hdr->name),
+             rtrimWhitespace(SP(hdr->body)));
     }
   }
 
@@ -177,18 +177,12 @@ class SIPHandler : public AsyncUDPSocket::ReadCallback {
   void finish() {
     output("Content-Length: 0\r\n\r\n");
     socket_.writeChain(peer_, reply_.move(), {});
-
-    if (VLOG_IS_ON(1)) {
-      google::LogMessage("", 0).stream()
-        << peer_ << " - - [" << formatTime(recvtime_) << "] \""
-        << ToStringPiece(REQ_LINE(&msg_).method) << " "
-        << ToStringPiece(REQ_LINE(&msg_).uri) << "\" "
-        << status_ << " 0";
-    }
+    log_.onResponse(status_, 0);
   }
 
  private:
   AsyncUDPSocket socket_;
+  AccessLogFormatter log_;
   std::vector<char> recvbuf_;
   TimePoint recvtime_;
   std::string fmtbuf_;
@@ -201,7 +195,9 @@ class SIPHandler : public AsyncUDPSocket::ReadCallback {
 
 class SipHandlerFactory : public RequestHandlerFactory {
  public:
-  explicit SipHandlerFactory(std::vector<std::shared_ptr<AsyncUDPSocket>> server)
+  explicit SipHandlerFactory(std::vector<std::shared_ptr<AsyncUDPSocket>> server,
+                             std::shared_ptr<folly::AsyncLogWriter> log)
+    : log_(std::move(log))
   {
     server_.reserve(server.size());
     for (const auto& socket : server)
@@ -210,7 +206,8 @@ class SipHandlerFactory : public RequestHandlerFactory {
 
   void onServerStart(EventBase* evb) noexcept override {
     for (auto sockFd : server_) {
-      handler_.push_back(std::make_unique<SIPHandler>(evb, sockFd));
+      auto handler = std::make_unique<SIPHandler>(evb, sockFd, AccessLogFormatter(log_));
+      handler_.push_back(std::move(handler));
     }
   }
 
@@ -225,10 +222,13 @@ class SipHandlerFactory : public RequestHandlerFactory {
  private:
   std::vector<NetworkSocket> server_;
   std::vector<std::unique_ptr<SIPHandler>> handler_;
+  std::shared_ptr<folly::AsyncLogWriter> log_;
 };
 
 
-std::unique_ptr<RequestHandlerFactory> makeSipHandlerFactory(std::vector<std::shared_ptr<AsyncUDPSocket>> server)
+std::unique_ptr<RequestHandlerFactory>
+makeSipHandlerFactory(std::vector<std::shared_ptr<folly::AsyncUDPSocket>> socket,
+                      std::shared_ptr<folly::AsyncLogWriter> log)
 {
-  return std::make_unique<SipHandlerFactory>(std::move(server));
+  return std::make_unique<SipHandlerFactory>(std::move(socket), std::move(log));
 }

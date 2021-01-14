@@ -3,10 +3,10 @@
 #include <folly/io/async/AsyncUDPSocket.h>
 #include <folly/portability/GFlags.h>
 #include <folly/system/HardwareConcurrency.h>
+#include <folly/logging/AsyncFileWriter.h>
 #include <proxygen/httpserver/HTTPServer.h>
 
-#include "Control.h"
-
+#include "CallFwd.h"
 
 using proxygen::HTTPServer;
 using proxygen::HTTPServerOptions;
@@ -14,6 +14,7 @@ using proxygen::RequestHandlerChain;
 using proxygen::RequestHandlerFactory;
 
 DEFINE_uint32(http_port, 11000, "Port to listen on with HTTP protocol");
+DEFINE_uint32(http_idle_timeout, 60, "A timeout to close inactive sessions");
 DEFINE_string(http_if1, "localhost", "IP/Hostname to bind HTTP to");
 DEFINE_string(http_if2, "", "Additional address to bind HTTP to");
 DEFINE_string(http_if3, "", "Additional address to bind HTTP to");
@@ -22,13 +23,10 @@ DEFINE_string(sip_if1, "127.0.0.1", "IP/Hostname to bind SIP to");
 DEFINE_string(sip_if2, "::1", "IP/Hostname to bind SIP to");
 DEFINE_string(sip_if3, "", "IP/Hostname to bind SIP to");
 DEFINE_string(sip_if4, "", "IP/Hostname to bind SIP to");
+DEFINE_string(access_log, "/tmp/callfwd.log", "An access log file");
 DEFINE_int32(threads, 0,
              "Number of threads to listen on. Numbers <= 0 "
              "will use the number of cores on this machine.");
-
-std::unique_ptr<RequestHandlerFactory> makeApiHandlerFactory();
-std::unique_ptr<RequestHandlerFactory> makeSipHandlerFactory(std::vector<std::shared_ptr<folly::AsyncUDPSocket>> socket);
-std::unique_ptr<RequestHandlerFactory> makeAccessLogHandlerFactory();
 
 int main(int argc, char* argv[]) {
   gflags::ParseCommandLineFlags(&argc, &argv, true);
@@ -63,9 +61,13 @@ int main(int argc, char* argv[]) {
     }
   }
 
+  std::shared_ptr<folly::AsyncFileWriter> logger;
+  if (!FLAGS_access_log.empty())
+    logger = std::make_shared<folly::AsyncFileWriter>(FLAGS_access_log);
+
   HTTPServerOptions options;
   options.threads = static_cast<size_t>(FLAGS_threads);
-  options.idleTimeout = std::chrono::milliseconds(60000);
+  options.idleTimeout = std::chrono::seconds(FLAGS_http_idle_timeout);
   options.shutdownOn = {SIGINT, SIGTERM};
   options.enableContentCompression = false;
   options.h2cEnabled = false;
@@ -74,9 +76,9 @@ int main(int argc, char* argv[]) {
   options.receiveStreamWindowSize = uint32_t(1 << 20);
   options.receiveSessionWindowSize = 10 * (1 << 20);
   options.handlerFactories = RequestHandlerChain()
-    .addThen(makeAccessLogHandlerFactory())
+    .addThen(makeAccessLogHandlerFactory(logger))
     .addThen(makeApiHandlerFactory())
-    .addThen(makeSipHandlerFactory(udpServer))
+    .addThen(makeSipHandlerFactory(udpServer, logger))
     .build();
 
   HTTPServer server(std::move(options));

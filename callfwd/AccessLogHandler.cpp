@@ -1,40 +1,56 @@
-#include <gflags/gflags.h>
-#include <glog/logging.h>
+#include <sstream>
+#include <iomanip>
+#include <folly/portability/GFlags.h>
+#include <folly/Format.h>
+#include <folly/logging/AsyncLogWriter.h>
 #include <proxygen/httpserver/RequestHandler.h>
 #include <proxygen/httpserver/Filters.h>
 #include <proxygen/httpserver/RequestHandlerFactory.h>
 
-using namespace proxygen;
+#include "CallFwd.h"
+
+using proxygen::RequestHandler;
+using proxygen::RequestHandlerFactory;
+using proxygen::HTTPMessage;
+using folly::AsyncLogWriter;
 using folly::StringPiece;
 
-std::string formatTime(TimePoint tp) {
-  time_t t = toTimeT(tp);
-  struct tm final_tm;
-  gmtime_r(&t, &final_tm);
-  char buf[256];
-  if (strftime(buf, sizeof(buf), "%d/%b/%Y:%H:%M:%S %z", &final_tm) > 0) {
-    return std::string(buf);
-  }
-  return "";
+AccessLogFormatter::AccessLogFormatter(std::shared_ptr<AsyncLogWriter> log)
+  : log_(std::move(log))
+{
 }
 
-class AccessLogHandler final : public Filter {
+void AccessLogFormatter::onRequest(const folly::SocketAddress &peer,
+                                   StringPiece method, StringPiece uri,
+                                   time_t startTime)
+{
+  const char* datefmt = "%d/%b/%Y:%H:%M:%S %z";
+  struct tm date;
+
+  if (!log_) return;
+  message_.clear();
+  gmtime_r(&startTime, &date);
+  message_ << peer << " - - " << "[" << std::put_time(&date, datefmt) << "] \""
+            << method << " " << uri << "\" ";
+}
+
+void AccessLogFormatter::onResponse(size_t status, size_t bytes)
+{
+  if (!log_) return;
+  message_ << status << " " << bytes << "\n";
+  log_->writeMessage(std::move(message_).str());
+}
+
+class AccessLogHandler final : public proxygen::Filter {
  public:
-  explicit AccessLogHandler(RequestHandler* upstream)
+  explicit AccessLogHandler(RequestHandler* upstream, AccessLogFormatter log)
     : Filter(upstream)
-    , log_("", 0)
+    , log_(std::move(log))
   {}
 
   void onRequest(std::unique_ptr<HTTPMessage> msg) noexcept override {
-    const folly::SocketAddress &peer = msg->getClientAddress();
-    const std::string &url = msg->getURL();
-    const std::string &method = msg->getMethodString();
-    std::string startTime = formatTime(msg->getStartTime());
-
-    log_.stream()
-      << peer << " - - " << "[" << startTime << "] \""
-      << method << " " << url << "\" ";
-
+    log_.onRequest(msg->getClientAddress(), msg->getMethodString(), msg->getURL(),
+                   proxygen::toTimeT(msg->getStartTime()));
     Filter::onRequest(std::move(msg));
   }
 
@@ -49,18 +65,23 @@ class AccessLogHandler final : public Filter {
   }
 
   void requestComplete() noexcept override {
-    log_.stream() << status_ << " " << bytes_;
+    log_.onResponse(status_, bytes_);
     delete this;
   }
 
  private:
-  google::LogMessage log_;
+  AccessLogFormatter log_;
   uint32_t status_ = 0;
   size_t bytes_ = 0;
 };
 
 class AccessLogHandlerFactory : public RequestHandlerFactory {
  public:
+  explicit AccessLogHandlerFactory(std::shared_ptr<AsyncLogWriter> log)
+    : log_(log)
+  {
+  }
+
   void onServerStart(folly::EventBase* /*evb*/) noexcept override {
   }
 
@@ -68,13 +89,16 @@ class AccessLogHandlerFactory : public RequestHandlerFactory {
   }
 
   RequestHandler* onRequest(RequestHandler *upstream, HTTPMessage *msg) noexcept override {
-    if (!VLOG_IS_ON(1))
+    if (!log_)
       return upstream;
-    return new AccessLogHandler(upstream);
+    return new AccessLogHandler(upstream, AccessLogFormatter(log_));
   }
+
+private:
+  std::shared_ptr<AsyncLogWriter> log_;
 };
 
-std::unique_ptr<RequestHandlerFactory> makeAccessLogHandlerFactory()
+std::unique_ptr<RequestHandlerFactory> makeAccessLogHandlerFactory(std::shared_ptr<AsyncLogWriter> log)
 {
-  return std::make_unique<AccessLogHandlerFactory>();
+  return std::make_unique<AccessLogHandlerFactory>(std::move(log));
 }

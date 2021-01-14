@@ -4,5 +4,4 @@ Description=Call forwarding daemon
 [Service]
 Restart=on-failure
 StandardError=journal
-Environment=GLOG_logtostderr=1 GLOG_v=1
 ExecStart=/home/sergio/prj/callfwd/build/callfwd/callfwd /dev/null
