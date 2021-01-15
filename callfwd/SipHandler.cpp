@@ -3,7 +3,6 @@
 #include <folly/portability/GFlags.h>
 #include <folly/io/async/AsyncUDPSocket.h>
 #include <folly/io/IOBufQueue.h>
-#include <folly/logging/AsyncLogWriter.h>
 #include <proxygen/httpserver/RequestHandlerFactory.h>
 
 #include "CallFwd.h"
@@ -29,9 +28,8 @@ inline StringPiece SP(str s) { return StringPiece(s.s, s.len); }
 
 class SIPHandler : public AsyncUDPSocket::ReadCallback {
  public:
-  explicit SIPHandler(EventBase *evb, NetworkSocket sockfd, AccessLogFormatter log)
+  explicit SIPHandler(EventBase *evb, NetworkSocket sockfd)
     : socket_(evb)
-    , log_(std::move(log))
     , recvbuf_(FLAGS_sip_max_length)
   {
     socket_.setFD(sockfd, AsyncUDPSocket::FDOwnership::SHARED);
@@ -44,7 +42,7 @@ class SIPHandler : public AsyncUDPSocket::ReadCallback {
   }
 
   void onReadError(const folly::AsyncSocketException& ex) noexcept override {
-    LOG(ERROR) << ex.what();
+    LOG_FIRST_N(ERROR, 200) << ex.what();
     socket_.resumeRead(this);
   }
 
@@ -123,8 +121,7 @@ class SIPHandler : public AsyncUDPSocket::ReadCallback {
       return;
     }
 
-    auto db = getPhoneMapping();
-    uint64_t targetPhone = db->findTarget(userPhone);
+    uint64_t targetPhone = getPhoneMapping()->findTarget(userPhone);
     if (targetPhone == PhoneMapping::NONE)
       targetPhone = userPhone;
     std::string target = "+1";
@@ -141,13 +138,13 @@ class SIPHandler : public AsyncUDPSocket::ReadCallback {
 
   void reply(uint64_t status, StringPiece message)
   {
-      status_ = status;
-      output("SIP/2.0 {} {}\r\n", status, message);
-      outputHeader(msg_.h_via1);
-      outputHeader(msg_.from);
-      outputHeader(msg_.to);
-      outputHeader(msg_.callid);
-      outputHeader(msg_.cseq);
+    status_ = status;
+    output("SIP/2.0 {} {}\r\n", status, message);
+    outputHeader(msg_.h_via1);
+    outputHeader(msg_.from);
+    outputHeader(msg_.to);
+    outputHeader(msg_.callid);
+    outputHeader(msg_.cseq);
   }
 
   void replyAndFinish(uint64_t status, StringPiece message)
@@ -195,9 +192,7 @@ class SIPHandler : public AsyncUDPSocket::ReadCallback {
 
 class SipHandlerFactory : public RequestHandlerFactory {
  public:
-  explicit SipHandlerFactory(std::vector<std::shared_ptr<AsyncUDPSocket>> server,
-                             std::shared_ptr<folly::AsyncLogWriter> log)
-    : log_(std::move(log))
+  explicit SipHandlerFactory(std::vector<std::shared_ptr<AsyncUDPSocket>> server)
   {
     server_.reserve(server.size());
     for (const auto& socket : server)
@@ -206,7 +201,7 @@ class SipHandlerFactory : public RequestHandlerFactory {
 
   void onServerStart(EventBase* evb) noexcept override {
     for (auto sockFd : server_) {
-      auto handler = std::make_unique<SIPHandler>(evb, sockFd, AccessLogFormatter(log_));
+      auto handler = std::make_unique<SIPHandler>(evb, sockFd);
       handler_.push_back(std::move(handler));
     }
   }
@@ -222,13 +217,11 @@ class SipHandlerFactory : public RequestHandlerFactory {
  private:
   std::vector<NetworkSocket> server_;
   std::vector<std::unique_ptr<SIPHandler>> handler_;
-  std::shared_ptr<folly::AsyncLogWriter> log_;
 };
 
 
 std::unique_ptr<RequestHandlerFactory>
-makeSipHandlerFactory(std::vector<std::shared_ptr<folly::AsyncUDPSocket>> socket,
-                      std::shared_ptr<folly::AsyncLogWriter> log)
+makeSipHandlerFactory(std::vector<std::shared_ptr<folly::AsyncUDPSocket>> socket)
 {
-  return std::make_unique<SipHandlerFactory>(std::move(socket), std::move(log));
+  return std::make_unique<SipHandlerFactory>(std::move(socket));
 }

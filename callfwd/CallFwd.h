@@ -7,11 +7,13 @@
 #include <folly/Range.h>
 
 class PhoneMapping;
+class AccessLogRotator;
 namespace folly {
   class AsyncUDPSocket;
-  class AsyncLogWriter;
   class SocketAddress;
   class IPAddress;
+  class LogWriter;
+  class EventBase;
 }
 namespace proxygen {
   class RequestHandlerFactory;
@@ -19,8 +21,6 @@ namespace proxygen {
 
 class AccessLogFormatter {
  public:
-  explicit AccessLogFormatter(std::shared_ptr<folly::AsyncLogWriter> log);
-
   void onRequest(const folly::SocketAddress &peer,
                  folly::StringPiece method, folly::StringPiece uri,
                  time_t startTime);
@@ -28,23 +28,25 @@ class AccessLogFormatter {
   void onResponse(size_t status, size_t bytes);
 
  private:
-  std::shared_ptr<folly::AsyncLogWriter> log_;
   std::ostringstream message_;
 };
 
 void startControlSocket();
 bool loadMappingFile(const char* fname);
 std::shared_ptr<PhoneMapping> getPhoneMapping();
+std::shared_ptr<folly::LogWriter> getAccessLogWriter();
 int checkACL(const folly::IPAddress &peer);
 
 std::unique_ptr<proxygen::RequestHandlerFactory>
 makeApiHandlerFactory();
 
 std::unique_ptr<proxygen::RequestHandlerFactory>
-makeSipHandlerFactory(std::vector<std::shared_ptr<folly::AsyncUDPSocket>> socket,
-                      std::shared_ptr<folly::AsyncLogWriter> log);
+makeSipHandlerFactory(std::vector<std::shared_ptr<folly::AsyncUDPSocket>> socket);
 
 std::unique_ptr<proxygen::RequestHandlerFactory>
-makeAccessLogHandlerFactory(std::shared_ptr<folly::AsyncLogWriter> log);
+makeAccessLogHandlerFactory();
+
+std::shared_ptr<AccessLogRotator>
+makeAccessLogRotator(folly::EventBase *evb);
 
 #endif // CALLFWD_H

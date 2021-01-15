@@ -23,7 +23,6 @@ DEFINE_string(sip_if1, "127.0.0.1", "IP/Hostname to bind SIP to");
 DEFINE_string(sip_if2, "::1", "IP/Hostname to bind SIP to");
 DEFINE_string(sip_if3, "", "IP/Hostname to bind SIP to");
 DEFINE_string(sip_if4, "", "IP/Hostname to bind SIP to");
-DEFINE_string(access_log, "/tmp/callfwd.log", "An access log file");
 DEFINE_int32(threads, 0,
              "Number of threads to listen on. Numbers <= 0 "
              "will use the number of cores on this machine.");
@@ -61,9 +60,7 @@ int main(int argc, char* argv[]) {
     }
   }
 
-  std::shared_ptr<folly::AsyncFileWriter> logger;
-  if (!FLAGS_access_log.empty())
-    logger = std::make_shared<folly::AsyncFileWriter>(FLAGS_access_log);
+  auto logRotator = makeAccessLogRotator(evb);
 
   HTTPServerOptions options;
   options.threads = static_cast<size_t>(FLAGS_threads);
@@ -76,9 +73,9 @@ int main(int argc, char* argv[]) {
   options.receiveStreamWindowSize = uint32_t(1 << 20);
   options.receiveSessionWindowSize = 10 * (1 << 20);
   options.handlerFactories = RequestHandlerChain()
-    .addThen(makeAccessLogHandlerFactory(logger))
+    .addThen(makeAccessLogHandlerFactory())
     .addThen(makeApiHandlerFactory())
-    .addThen(makeSipHandlerFactory(udpServer, logger))
+    .addThen(makeSipHandlerFactory(udpServer))
     .build();
 
   HTTPServer server(std::move(options));

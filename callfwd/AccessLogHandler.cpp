@@ -2,7 +2,7 @@
 #include <iomanip>
 #include <folly/portability/GFlags.h>
 #include <folly/Format.h>
-#include <folly/logging/AsyncLogWriter.h>
+#include <folly/logging/LogWriter.h>
 #include <proxygen/httpserver/RequestHandler.h>
 #include <proxygen/httpserver/Filters.h>
 #include <proxygen/httpserver/RequestHandlerFactory.h>
@@ -12,13 +12,7 @@
 using proxygen::RequestHandler;
 using proxygen::RequestHandlerFactory;
 using proxygen::HTTPMessage;
-using folly::AsyncLogWriter;
 using folly::StringPiece;
-
-AccessLogFormatter::AccessLogFormatter(std::shared_ptr<AsyncLogWriter> log)
-  : log_(std::move(log))
-{
-}
 
 void AccessLogFormatter::onRequest(const folly::SocketAddress &peer,
                                    StringPiece method, StringPiece uri,
@@ -27,7 +21,6 @@ void AccessLogFormatter::onRequest(const folly::SocketAddress &peer,
   const char* datefmt = "%d/%b/%Y:%H:%M:%S %z";
   struct tm date;
 
-  if (!log_) return;
   message_.clear();
   gmtime_r(&startTime, &date);
   message_ << peer << " - - " << "[" << std::put_time(&date, datefmt) << "] \""
@@ -36,16 +29,15 @@ void AccessLogFormatter::onRequest(const folly::SocketAddress &peer,
 
 void AccessLogFormatter::onResponse(size_t status, size_t bytes)
 {
-  if (!log_) return;
   message_ << status << " " << bytes << "\n";
-  log_->writeMessage(std::move(message_).str());
+  if (auto log = getAccessLogWriter())
+    log->writeMessage(std::move(message_).str());
 }
 
 class AccessLogHandler final : public proxygen::Filter {
  public:
-  explicit AccessLogHandler(RequestHandler* upstream, AccessLogFormatter log)
+  explicit AccessLogHandler(RequestHandler* upstream)
     : Filter(upstream)
-    , log_(std::move(log))
   {}
 
   void onRequest(std::unique_ptr<HTTPMessage> msg) noexcept override {
@@ -77,11 +69,6 @@ class AccessLogHandler final : public proxygen::Filter {
 
 class AccessLogHandlerFactory : public RequestHandlerFactory {
  public:
-  explicit AccessLogHandlerFactory(std::shared_ptr<AsyncLogWriter> log)
-    : log_(log)
-  {
-  }
-
   void onServerStart(folly::EventBase* /*evb*/) noexcept override {
   }
 
@@ -89,16 +76,13 @@ class AccessLogHandlerFactory : public RequestHandlerFactory {
   }
 
   RequestHandler* onRequest(RequestHandler *upstream, HTTPMessage *msg) noexcept override {
-    if (!log_)
+    if (!getAccessLogWriter())
       return upstream;
-    return new AccessLogHandler(upstream, AccessLogFormatter(log_));
+    return new AccessLogHandler(upstream);
   }
-
-private:
-  std::shared_ptr<AsyncLogWriter> log_;
 };
 
-std::unique_ptr<RequestHandlerFactory> makeAccessLogHandlerFactory(std::shared_ptr<AsyncLogWriter> log)
+std::unique_ptr<RequestHandlerFactory> makeAccessLogHandlerFactory()
 {
-  return std::make_unique<AccessLogHandlerFactory>(std::move(log));
+  return std::make_unique<AccessLogHandlerFactory>();
 }
