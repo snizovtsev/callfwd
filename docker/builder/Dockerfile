@@ -19,7 +19,7 @@ RUN TBB_URL=https://github.com/oneapi-src/oneTBB/releases/download/2019_U9 \
     && echo "Downloading $TBB_URL/$TBB_ARCHIVE" \
     && curl -L "$TBB_URL/$TBB_ARCHIVE" -o "/tmp/$TBB_ARCHIVE" \
     && tar xf "/tmp/$TBB_ARCHIVE" -C /opt \
-    && rm -f "/opt/$TBB_ARCHIVE"
+    && rm -f "/tmp/$TBB_ARCHIVE"
 ENV CMAKE_PREFIX_PATH=/opt/tbb2019_$TBB_VERSION
 
 RUN echo 'source /opt/rh/devtoolset-9/enable' > /etc/profile.d/devtoolset.sh \
