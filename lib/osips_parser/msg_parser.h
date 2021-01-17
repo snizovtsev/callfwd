@@ -473,7 +473,7 @@ inline static int get_callid(struct sip_msg* _m, str* _cid)
 #define get_header_by_static_name(_msg, _name) \
 		get_header_by_name(_msg, _name, sizeof(_name)-1)
 inline static struct hdr_field *get_header_by_name( struct sip_msg *msg,
-													char *s, unsigned int len)
+													char *s, int len)
 {
 	struct hdr_field *hdr;
 

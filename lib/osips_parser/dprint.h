@@ -11,11 +11,11 @@
 #define LM_INFO( ...) while (0) {}
 #define LM_DBG( ...) while (0) {}
 
-#define LM_BUG(format, args...) \
+#define LM_BUG(msg) \
 	do { \
-		LM_CRIT("\n>>> " format"\nIt seems you have hit a programming bug.\n" \
+		LM_CRIT("\n>>> " msg"\nIt seems you have hit a programming bug.\n" \
 				"Please help us make OpenSIPS better by reporting it at " \
-				"https://github.com/OpenSIPS/opensips/issues\n\n", ##args); \
+				"https://github.com/OpenSIPS/opensips/issues\n\n"); \
 	} while (0)
 
 #endif // OSIPS_DPRINT_H
