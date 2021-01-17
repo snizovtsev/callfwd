@@ -6,6 +6,7 @@
 #include <iostream>
 #include <thread>
 #include <iomanip>
+#include <atomic>
 #include <sys/signal.h>
 #include <systemd/sd-daemon.h>
 #include <systemd/sd-journal.h>
@@ -35,7 +36,7 @@ struct ACLRule {
   folly::TokenBucket callLimiter{1e10, 1e10};
 };
 
-static folly::Synchronized<std::shared_ptr<PhoneMapping>> currentMapping;
+static std::atomic<PhoneMapping::Data*> currentMapping;
 static folly::Synchronized<std::shared_ptr<std::unordered_map<folly::IPAddress, ACLRule>>> ACLs;
 static folly::Synchronized<std::shared_ptr<folly::AsyncFileWriter>> accessLogWriter;
 
@@ -62,9 +63,9 @@ std::shared_ptr<AccessLogRotator> makeAccessLogRotator(folly::EventBase *evb)
   return std::make_shared<AccessLogRotator>(evb);
 }
 
-std::shared_ptr<PhoneMapping> getPhoneMapping()
+PhoneMapping PhoneMapping::get() noexcept
 {
-  return currentMapping.copy();
+  return {currentMapping};
 }
 
 std::shared_ptr<folly::LogWriter> getAccessLogWriter()
@@ -155,7 +156,7 @@ static bool loadACLFile(int fd)
   return true;
 }
 
-static bool loadMappingFile(std::ifstream &in, PhoneMappingBuilder &builder)
+static bool loadMappingFile(std::ifstream &in, PhoneMapping::Builder &builder)
 {
   std::vector<char> rbuf(1ull << 19);
   std::string line;
@@ -166,7 +167,7 @@ static bool loadMappingFile(std::ifstream &in, PhoneMappingBuilder &builder)
   while (getline(in, line)) {
     try {
       folly::splitTo<uint64_t>(",", line, std::back_inserter(row));
-      builder.addMapping(row[0], row[1]);
+      builder.addRow(row[0], row[1]);
     } catch (std::runtime_error& e) {
       LOG(ERROR) << "Read failed on line " << nrows << ": " << e.what();
       in.close();
@@ -184,13 +185,14 @@ static bool loadMappingFile(std::ifstream &in, PhoneMappingBuilder &builder)
   in.close();
 
   LOG(INFO) << "Building index (" << nrows << " rows)...";
-  currentMapping.exchange(builder.build());
+  builder.commit(currentMapping);
+  folly::hazptr_cleanup();
   return true;
 }
 
 static bool loadMappingFile(int fd)
 {
-  PhoneMappingBuilder builder;
+  PhoneMapping::Builder builder;
 
   std::string fname = "/proc/self/fd/";
   fname += folly::to<std::string>(fd);
@@ -204,7 +206,7 @@ static bool loadMappingFile(int fd)
   if (fstat(fd, &s) == 0) {
     if (s.st_size > 1000) {
       size_t lineEstimate = s.st_size / 23;
-      builder.SizeHint(lineEstimate + lineEstimate / 10);
+      builder.sizeHint(lineEstimate + lineEstimate / 10);
       LOG(INFO) << "Estimated number of lines: " << lineEstimate;
     }
   }
@@ -215,7 +217,7 @@ static bool loadMappingFile(int fd)
 
 bool loadMappingFile(const char* fname)
 {
-  PhoneMappingBuilder builder;
+  PhoneMapping::Builder builder;
   std::ifstream in(fname);
   CHECK(!in.fail()) << "Failed to open " << fname;
 
@@ -225,7 +227,7 @@ bool loadMappingFile(const char* fname)
   if (lstat(fname, &s) == 0) {
     if (s.st_size > 1000) {
       size_t lineEstimate = s.st_size / 23;
-      builder.SizeHint(lineEstimate + lineEstimate / 10);
+      builder.sizeHint(lineEstimate + lineEstimate / 10);
       LOG(INFO) << "Estimated number of lines: " << lineEstimate;
     }
   }
@@ -243,7 +245,7 @@ static bool verifyMappingFile(int fd)
   CHECK(!in.fail());
 
   LOG(INFO) << "Verifying database";
-  auto db = getPhoneMapping();
+  PhoneMapping db = PhoneMapping::get();
   std::string line;
   std::vector<uint64_t> row;
   size_t nrows = 0;
@@ -257,7 +259,7 @@ static bool verifyMappingFile(int fd)
       return false;
     }
 
-    if (db->findTarget(row[0]) != row[1]) {
+    if (db.getRN(row[0]) != row[1]) {
       LOG(ERROR) << (nrows+1) << ": key " << row[0] << " differs";
     }
 
@@ -271,8 +273,8 @@ static bool verifyMappingFile(int fd)
     return false;
   }
 
-  if (nrows != db->size()) {
-    LOG(ERROR) << "Loaded DB has " << db->size() - nrows << " extra rows";
+  if (nrows != db.size()) {
+    LOG(ERROR) << "Loaded DB has " << db.size() - nrows << " extra rows";
     return false;
   }
 
@@ -288,15 +290,15 @@ static bool dumpMappingFile(int fd)
 
   LOG(INFO) << "Dumping database";
   size_t nrows = 0;
-  PhoneMappingDumper dumper(getPhoneMapping());
 
-  while (dumper.hasNext()) {
-    out << dumper.currentSource() << "," << dumper.currentTarget() << "\r\n";
-    dumper.moveNext();
-  }
+  for (PhoneMapping db = PhoneMapping::get().visitRows();
+       out.good() && db.hasRow(); db.advance())
+    {
+      out << db.currentPN() << "," << db.currentRN() << "\r\n";
+    }
 
   out.flush();
-  if (out.fail()) {
+  if (out.fail() || out.bad()) {
     out.close();
     LOG(ERROR) << "Write failed on line " << nrows;
     return false;

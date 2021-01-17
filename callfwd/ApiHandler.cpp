@@ -60,8 +60,8 @@ class TargetHandler final : public RequestHandler {
 
   void onQueryComplete() noexcept {
     for (uint64_t phone : query_) {
-      uint64_t target = getPhoneMapping()->findTarget(phone);
-      if (target != PhoneMapping::NONE)
+      uint64_t target = PhoneMapping::get().getRN(phone);
+      if (target != PhoneNumber::NOTFOUND)
         resp_.push_back(target);
       else
         resp_.push_back(phone);
@@ -148,9 +148,12 @@ class ReverseHandler final : public RequestHandler {
                                                 std::placeholders::_1,
                                                 std::placeholders::_2));
 
+    PhoneMapping db = PhoneMapping::get();
     for (std::pair<uint64_t, uint64_t> range : query_) {
-      auto phones = getPhoneMapping()->reverseTarget(range.first, range.second);
-      std::copy(phones.begin(), phones.end(), std::back_inserter(resp_));
+      db.inverseRNs(range.first, range.second);
+      for (; db.hasRow(); db.advance()) {
+        resp_.push_back(db.currentPN());
+      }
     }
 
     ResponseBuilder(downstream_)

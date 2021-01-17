@@ -121,8 +121,8 @@ class SIPHandler : public AsyncUDPSocket::ReadCallback {
       return;
     }
 
-    uint64_t targetPhone = getPhoneMapping()->findTarget(userPhone);
-    if (targetPhone == PhoneMapping::NONE)
+    uint64_t targetPhone = PhoneMapping::get().getRN(userPhone);
+    if (targetPhone == PhoneNumber::NOTFOUND)
       targetPhone = userPhone;
     std::string target = "+1";
     target += folly::to<std::string>(targetPhone);

@@ -1,3 +1,4 @@
+#include <folly/init/Init.h>
 #include <folly/Memory.h>
 #include <folly/io/async/EventBaseManager.h>
 #include <folly/io/async/AsyncUDPSocket.h>
@@ -28,8 +29,7 @@ DEFINE_int32(threads, 0,
              "will use the number of cores on this machine.");
 
 int main(int argc, char* argv[]) {
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
-  google::InitGoogleLogging(argv[0]);
+  folly::Init init(&argc, &argv);
   google::InstallFailureSignalHandler();
   setlocale(LC_ALL, "C");
   startControlSocket();

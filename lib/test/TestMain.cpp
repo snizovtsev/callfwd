@@ -1,22 +1,15 @@
-/*
- * Copyright (c) Facebook, Inc. and its affiliates.
- * All rights reserved.
- *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree.
- */
-
 // Use this main function in gtest unit tests to enable glog
 #include <folly/portability/GFlags.h>
 #include <folly/portability/GTest.h>
+#include <folly/init/Init.h>
+#include <folly/synchronization/HazptrDomain.h>
 #include <glog/logging.h>
 
 int main(int argc, char* argv[]) {
-  std::cout <<"Test"<<std::endl;
   testing::InitGoogleTest(&argc, argv);
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
-  google::InitGoogleLogging(argv[0]);
   google::InstallFailureSignalHandler();
-  LOG(INFO) << "Running tests from TestMain.cpp";
-  return RUN_ALL_TESTS();
+  folly::Init init(&argc, &argv);
+  int status = RUN_ALL_TESTS();
+  folly::hazptr_cleanup();
+  return status;
 }

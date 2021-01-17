@@ -6,7 +6,6 @@
 #include <memory>
 #include <folly/Range.h>
 
-class PhoneMapping;
 class AccessLogRotator;
 namespace folly {
   class AsyncUDPSocket;
@@ -33,7 +32,6 @@ class AccessLogFormatter {
 
 void startControlSocket();
 bool loadMappingFile(const char* fname);
-std::shared_ptr<PhoneMapping> getPhoneMapping();
 std::shared_ptr<folly::LogWriter> getAccessLogWriter();
 int checkACL(const folly::IPAddress &peer);
 
