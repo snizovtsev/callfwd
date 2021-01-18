@@ -7,6 +7,7 @@
 #include <folly/small_vector.h>
 #include <proxygen/lib/http/HTTPCommonHeaders.h>
 #include <proxygen/lib/http/HTTPMethod.h>
+#include <proxygen/lib/http/RFC2616.h>
 #include <proxygen/httpserver/RequestHandler.h>
 #include <proxygen/httpserver/RequestHandlerFactory.h>
 #include <proxygen/httpserver/ResponseBuilder.h>
@@ -22,21 +23,28 @@ DEFINE_uint32(max_query_length, 32768,
               "Maximum length of POST x-www-form-urlencoded body");
 
 
+bool isJsonRequested(StringPiece accept) {
+  RFC2616::TokenPairVec acceptTok;
+  RFC2616::parseQvalues(accept, acceptTok);
+  return acceptTok.size() > 0 && acceptTok[0].first == "application/json";
+}
+
 class TargetHandler final : public RequestHandler {
  public:
   void onRequest(std::unique_ptr<HTTPMessage> req) noexcept override {
+    using namespace std::placeholders;
+    req->getHeaders()
+      .forEachWithCode(std::bind(&TargetHandler::sanitizeHeader,
+                                 this, _1, _2, _3));
+
     if (req->getMethod() == HTTPMethod::GET) {
+      needBody_ = false;
       onQueryString(req->getQueryStringAsStringPiece());
       onQueryComplete();
       return;
     }
 
     if (req->getMethod() == HTTPMethod::POST) {
-      using namespace std::placeholders;
-      needBody_ = true;
-      req->getHeaders()
-        .forEachWithCode(std::bind(&TargetHandler::sanitizePostHeader,
-                                   this, _1, _2, _3));
       if (needBody_)
         return;
     }
@@ -46,8 +54,8 @@ class TargetHandler final : public RequestHandler {
       .sendWithEOM();
   }
 
-  void sanitizePostHeader(HTTPHeaderCode code, const std::string& name,
-                          const std::string& value) noexcept {
+  void sanitizeHeader(HTTPHeaderCode code, const std::string& name,
+                      const std::string& value) noexcept {
     switch (code) {
     case HTTP_HEADER_CONTENT_LENGTH:
       if (folly::to<size_t>(value) > FLAGS_max_query_length)
@@ -56,6 +64,9 @@ class TargetHandler final : public RequestHandler {
     case HTTP_HEADER_CONTENT_TYPE:
       if (value != "application/x-www-form-urlencoded")
         needBody_ = false;
+      break;
+    case HTTP_HEADER_ACCEPT:
+      json_ = isJsonRequested(value);
       break;
     default:
       break;
@@ -72,20 +83,33 @@ class TargetHandler final : public RequestHandler {
 
     ResponseBuilder(downstream_)
       .status(200, "OK")
-      .header(HTTP_HEADER_CONTENT_TYPE, "text/plain")
+      .header(HTTP_HEADER_CONTENT_TYPE,
+              json_ ? "application/json" : "text/plain")
       .send();
 
+    if (json_)
+      record += "[\n";
     for (size_t i = 0; i < N; ++i) {
-      if (rn_[i] != PhoneNumber::NONE)
-        folly::format(&record, "{},{}\n", pn_[i], rn_[i]);
-      else
-        folly::format(&record, "{},\n", pn_[i]);
+      if (json_) {
+        if (rn_[i] != PhoneNumber::NONE)
+          folly::format(&record, "  {{\"pn\": \"{}\", \"rn\": \"{}\"}},\n", pn_[i], rn_[i]);
+        else
+          folly::format(&record, "  {{\"pn\": \"{}\", \"rn\": null}},\n", pn_[i]);
+      } else {
+        if (rn_[i] != PhoneNumber::NONE)
+          folly::format(&record, "{},{}\n", pn_[i], rn_[i]);
+        else
+          folly::format(&record, "{},\n", pn_[i]);
+      }
 
       if (record.size() > 1000) {
         downstream_->sendBody(folly::IOBuf::copyBuffer(record));
         record.clear();
       }
     }
+    if (json_)
+      record += "]\n";
+
     if (!record.empty())
       downstream_->sendBody(folly::IOBuf::copyBuffer(record));
     downstream_->sendEOM();
@@ -144,7 +168,8 @@ class TargetHandler final : public RequestHandler {
   }
 
  private:
-  bool needBody_ = false;
+  bool needBody_ = true;
+  bool json_ = false;
   std::unique_ptr<folly::IOBuf> body_;
   folly::small_vector<uint64_t, 16> pn_;
   folly::small_vector<uint64_t, 16> rn_;
@@ -166,24 +191,40 @@ class ReverseHandler final : public RequestHandler {
                                       std::bind(&ReverseHandler::onQueryParam,
                                                 this, _1, _2));
 
+    const std::string &accept = req->getHeaders()
+      .getSingleOrEmpty(HTTP_HEADER_ACCEPT);
+    bool json = isJsonRequested(accept);
+
     ResponseBuilder(downstream_)
       .status(200, "OK")
-      .header("Content-Type", "text/plain")
+      .header(HTTP_HEADER_CONTENT_TYPE,
+              json ? "application/json" : "text/plain")
       .send();
 
     PhoneMapping db = PhoneMapping::get();
     std::string record;
 
+    if (json)
+      record += "[\n";
     for (std::pair<uint64_t, uint64_t> range : query_) {
       db.inverseRNs(range.first, range.second);
       for (; db.hasRow(); db.advance()) {
-        folly::format(&record, "{},{}\n", db.currentPN(), db.currentRN());
+        if (json) {
+          folly::format(&record, "  {{\"pn\": \"{}\", \"rn\": \"{}\"}},\n",
+                        db.currentPN(), db.currentRN());
+        } else {
+          folly::format(&record, "{},{}\n", db.currentPN(), db.currentRN());
+        }
+
         if (record.size() > 1000) {
           downstream_->sendBody(folly::IOBuf::copyBuffer(record));
           record.clear();
         }
       }
     }
+    if (json)
+      record += "]\n";
+
     if (!record.empty())
       downstream_->sendBody(folly::IOBuf::copyBuffer(record));
     downstream_->sendEOM();
