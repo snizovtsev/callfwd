@@ -111,10 +111,6 @@ class InverseRNVisitor final : public PhoneMapping::Cursor {
   const PhoneList *it_, *end_;
 };
 
-static inline bool operator< (const PhoneList &lhs, const PhoneList &rhs) {
-  return std::tie(lhs.phone, lhs.next) < std::tie(rhs.phone, rhs.next);
-}
-
 class RowVisitor final : public PhoneMapping::Cursor {
  public:
   using Iterator = std::vector<PhoneList>::const_iterator;
@@ -128,16 +124,17 @@ class RowVisitor final : public PhoneMapping::Cursor {
   Iterator it_, end_;
 };
 
+static inline bool operator< (const PhoneList &lhs, const PhoneList &rhs) {
+  return std::tie(lhs.phone, lhs.next) < std::tie(rhs.phone, rhs.next);
+}
+
 std::unique_ptr<PhoneMapping::Cursor>
 PhoneMapping::Data::inverseRNs(uint64_t fromRN, uint64_t toRN) const
 {
   std::vector<uint64_t> ret;
 
-  auto rnLeft = std::lower_bound(rnIndex.begin(), rnIndex.end(),
-                                 PhoneList{fromRN, NULL});
-  auto rnRight = std::upper_bound(rnLeft, rnIndex.end(),
-                                  PhoneList{toRN, NULL});
-
+  auto rnLeft = std::lower_bound(rnIndex.begin(), rnIndex.end(), PhoneList{fromRN, NULL});
+  auto rnRight = std::upper_bound(rnLeft, rnIndex.end(), PhoneList{toRN, NULL});
   const PhoneList *pnBegin = rnLeft == rnIndex.end() ? nullptr : rnLeft->next;
   const PhoneList *pnEnd = rnRight == rnIndex.end() ? nullptr : rnRight->next;
 
@@ -224,10 +221,6 @@ PhoneMapping::Builder& PhoneMapping::Builder::addRow(uint64_t pn, uint64_t rn)
   return *this;
 }
 
-static inline bool operator== (const PhoneList &lhs, const PhoneList &rhs) {
-  return lhs.phone == rhs.phone;
-}
-
 void PhoneMapping::Data::build()
 {
   size_t N = pnColumn.size();
@@ -246,7 +239,10 @@ void PhoneMapping::Data::build()
   for (size_t i = 0; i + 1 < N; ++i)
     rnIndex[i].next->next = rnIndex[i+1].next;
 
-  auto last = std::unique(rnIndex.begin(), rnIndex.end());
+  static auto cmp = [](const PhoneList &lhs, const PhoneList &rhs) {
+    return lhs.phone == rhs.phone;
+  };
+  auto last = std::unique(rnIndex.begin(), rnIndex.end(), cmp);
   rnIndex.erase(last, rnIndex.end());
   rnIndex.shrink_to_fit();
 }
@@ -261,7 +257,10 @@ PhoneMapping PhoneMapping::Builder::build()
 
 void PhoneMapping::Builder::commit(std::atomic<Data*> &global)
 {
-  if (Data *veteran = global.exchange(data_.release()))
+  auto data = std::make_unique<Data>();
+  std::swap(data, data_);
+  data->build();
+  if (Data *veteran = global.exchange(data.release()))
     veteran->retire();
 }
 
