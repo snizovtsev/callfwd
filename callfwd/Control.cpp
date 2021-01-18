@@ -68,6 +68,10 @@ PhoneMapping PhoneMapping::get() noexcept
   return {currentMapping};
 }
 
+bool PhoneMapping::isAvailable() noexcept {
+  return !!currentMapping.load();
+}
+
 std::shared_ptr<folly::LogWriter> getAccessLogWriter()
 {
   return accessLogWriter.copy();
@@ -215,7 +219,7 @@ static bool loadMappingFile(int fd)
   return loadMappingFile(in, builder);
 }
 
-bool loadMappingFile(const char* fname)
+static bool loadMappingFile(const char* fname)
 {
   PhoneMapping::Builder builder;
   std::ifstream in(fname);
@@ -351,7 +355,9 @@ public:
   }
 };
 
-static void controlThread(int sock) {
+static void controlThread(int sock, const char *initialDB) {
+  loadMappingFile(initialDB);
+
   std::string pkt(1500, 'x');
   union {
       char buf[256];
@@ -426,7 +432,7 @@ static void controlThread(int sock) {
   }
 }
 
-void startControlSocket() {
+void startControlSocket(const char* initialDB) {
   static JournaldSink journalSink;
   if (sd_listen_fds(0) != 1) {
     LOG(WARNING) << "launched without systemd, control socket disabled";
@@ -434,5 +440,6 @@ void startControlSocket() {
   }
   google::AddLogSink(&journalSink);
   int fd = SD_LISTEN_FDS_START + 0;
-  std::thread(std::bind(controlThread, fd)).detach();
+  std::thread(std::bind(controlThread, fd, initialDB))
+     .detach();
 }

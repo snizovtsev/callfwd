@@ -1,5 +1,8 @@
 #include <functional>
 #include <gflags/gflags.h>
+#include <folly/Likely.h>
+#include <folly/Range.h>
+#include <folly/Conv.h>
 #include <folly/small_vector.h>
 #include <proxygen/lib/http/HTTPCommonHeaders.h>
 #include <proxygen/lib/http/HTTPMethod.h>
@@ -213,16 +216,26 @@ class ApiHandlerFactory : public RequestHandlerFactory {
   void onServerStop() noexcept override {
   }
 
+  template<class H, class... Args>
+  RequestHandler* makeHandler(Args&&... args)
+  {
+    if (LIKELY(PhoneMapping::isAvailable())) {
+      return new H(std::forward(args)...);
+    } else {
+      return new DirectResponseHandler(503, "Service Unavailable", "");
+    }
+  }
+
   RequestHandler* onRequest(RequestHandler *upstream, HTTPMessage *msg) noexcept override {
     const StringPiece path = msg->getPathAsStringPiece();
 
     if (path == "/target") {
-      return new TargetHandler;
+      return this->makeHandler<TargetHandler>();
     } else if (path == "/reverse") {
-      return new ReverseHandler;
+      return this->makeHandler<ReverseHandler>();
+    } else {
+      return new DirectResponseHandler(404, "Not found", "");
     }
-
-    return new DirectResponseHandler(404, "Not found", "");
   }
 };
 

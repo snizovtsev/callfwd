@@ -30,8 +30,7 @@ class AccessLogFormatter {
   std::ostringstream message_;
 };
 
-void startControlSocket();
-bool loadMappingFile(const char* fname);
+void startControlSocket(const char* initialDB);
 std::shared_ptr<folly::LogWriter> getAccessLogWriter();
 int checkACL(const folly::IPAddress &peer);
 

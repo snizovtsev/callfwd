@@ -1,5 +1,6 @@
 #include <glog/logging.h>
 #include <folly/Format.h>
+#include <folly/Likely.h>
 #include <folly/portability/GFlags.h>
 #include <folly/io/async/AsyncUDPSocket.h>
 #include <folly/io/IOBufQueue.h>
@@ -65,8 +66,15 @@ class SIPHandler : public AsyncUDPSocket::ReadCallback {
       return;
     }
 
-    log_.onRequest(peer_, SP(REQ_LINE(&msg_).method), SP(REQ_LINE(&msg_).uri),
+    log_.onRequest(peer_,
+                   SP(REQ_LINE(&msg_).method),
+                   SP(REQ_LINE(&msg_).uri),
                    proxygen::toTimeT(recvtime_));
+
+    if (UNLIKELY(!PhoneMapping::isAvailable())) {
+      reply(503, "Service Unavailable");
+      goto finish;
+    }
 
     switch (msg_.REQ_METHOD) {
     case METHOD_OPTIONS:
@@ -75,8 +83,12 @@ class SIPHandler : public AsyncUDPSocket::ReadCallback {
     case METHOD_INVITE:
       handleInvite();
       break;
+    default:
+      reply(405, "Method Not Allowed");
+      break;
     }
 
+  finish:
     output("Content-Length: 0\r\n\r\n");
     socket_.writeChain(peer_, reply_.move(), {});
     log_.onResponse(status_, 0);

@@ -32,7 +32,7 @@ int main(int argc, char* argv[]) {
   folly::Init init(&argc, &argv);
   google::InstallFailureSignalHandler();
   setlocale(LC_ALL, "C");
-  startControlSocket();
+  startControlSocket(argv[1]);
 
   CHECK(FLAGS_http_port < 65536);
   if (FLAGS_threads <= 0) {
@@ -60,8 +60,6 @@ int main(int argc, char* argv[]) {
     }
   }
 
-  auto logRotator = makeAccessLogRotator(evb);
-
   HTTPServerOptions options;
   options.threads = static_cast<size_t>(FLAGS_threads);
   options.idleTimeout = std::chrono::seconds(FLAGS_http_idle_timeout);
@@ -82,9 +80,8 @@ int main(int argc, char* argv[]) {
   LOG(INFO) << "Starting HTTP server on port " << FLAGS_http_port;
   server.bind(IPs);
 
-  loadMappingFile(argv[1]);
-
   LOG(INFO) << "Serving requests";
+  auto logRotator = makeAccessLogRotator(evb);
   server.start();
   for (auto& sock : udpServer) {
     sock->close();

@@ -49,6 +49,8 @@ class PhoneMapping {
   PhoneMapping(PhoneMapping&& rhs) noexcept;
   /** Get default instance from global variable. */
   static PhoneMapping get() noexcept;
+  /** Check if DB fully loaded into memory. */
+  static bool isAvailable() noexcept;
   ~PhoneMapping() noexcept;
 
   /** Get total number of records */
