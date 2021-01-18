@@ -3,6 +3,7 @@
 #include <folly/Likely.h>
 #include <folly/Range.h>
 #include <folly/Conv.h>
+#include <folly/Format.h>
 #include <folly/small_vector.h>
 #include <proxygen/lib/http/HTTPCommonHeaders.h>
 #include <proxygen/lib/http/HTTPMethod.h>
@@ -62,19 +63,32 @@ class TargetHandler final : public RequestHandler {
   }
 
   void onQueryComplete() noexcept {
-    for (uint64_t phone : query_) {
-      uint64_t target = PhoneMapping::get().getRN(phone);
-      if (target != PhoneNumber::NONE)
-        resp_.push_back(target);
-      else
-        resp_.push_back(phone);
-    }
+    size_t N = pn_.size();
+    std::string record;
+
+    rn_.resize(N);
+    PhoneMapping::get()
+      .getRNs(N, pn_.data(), rn_.data());
 
     ResponseBuilder(downstream_)
       .status(200, "OK")
       .header(HTTP_HEADER_CONTENT_TYPE, "text/plain")
-      .body(folly::join(",", resp_)+'\n')
-      .sendWithEOM();
+      .send();
+
+    for (size_t i = 0; i < N; ++i) {
+      if (rn_[i] != PhoneNumber::NONE)
+        folly::format(&record, "{},{}\n", pn_[i], rn_[i]);
+      else
+        folly::format(&record, "{},\n", pn_[i]);
+
+      if (record.size() > 1000) {
+        downstream_->sendBody(folly::IOBuf::copyBuffer(record));
+        record.clear();
+      }
+    }
+    if (!record.empty())
+      downstream_->sendBody(folly::IOBuf::copyBuffer(record));
+    downstream_->sendEOM();
   }
 
   void onQueryString(StringPiece query) {
@@ -85,9 +99,9 @@ class TargetHandler final : public RequestHandler {
 
   void onQueryParam(StringPiece name, StringPiece value) {
     if (name == "phone%5B%5D" || name == "phone[]") {
-      auto intValue = folly::tryTo<uint64_t>(value);
-      if (intValue.hasValue())
-        query_.push_back(intValue.value());
+      uint64_t pn = PhoneNumber::fromString(value);
+      if (pn != PhoneNumber::NONE)
+        pn_.push_back(pn);
     }
   }
 
@@ -132,50 +146,62 @@ class TargetHandler final : public RequestHandler {
  private:
   bool needBody_ = false;
   std::unique_ptr<folly::IOBuf> body_;
-  folly::small_vector<uint64_t, 16> query_;
-  folly::small_vector<uint64_t, 16> resp_;
+  folly::small_vector<uint64_t, 16> pn_;
+  folly::small_vector<uint64_t, 16> rn_;
 };
 
 class ReverseHandler final : public RequestHandler {
  public:
   void onRequest(std::unique_ptr<HTTPMessage> req) noexcept override {
+    using namespace std::placeholders;
+
     if (req->getMethod() != HTTPMethod::GET) {
       ResponseBuilder(downstream_)
         .status(400, "Bad Request")
-        .send();
+        .sendWithEOM();
       return;
     }
 
     HTTPMessage::splitNameValuePieces(req->getQueryStringAsStringPiece(), '&', '=',
-                                      std::bind(&ReverseHandler::onQueryParam, this,
-                                                std::placeholders::_1,
-                                                std::placeholders::_2));
-
-    PhoneMapping db = PhoneMapping::get();
-    for (std::pair<uint64_t, uint64_t> range : query_) {
-      db.inverseRNs(range.first, range.second);
-      for (; db.hasRow(); db.advance()) {
-        resp_.push_back(db.currentPN());
-      }
-    }
+                                      std::bind(&ReverseHandler::onQueryParam,
+                                                this, _1, _2));
 
     ResponseBuilder(downstream_)
       .status(200, "OK")
       .header("Content-Type", "text/plain")
-      .body(folly::join(",", resp_))
       .send();
+
+    PhoneMapping db = PhoneMapping::get();
+    std::string record;
+
+    for (std::pair<uint64_t, uint64_t> range : query_) {
+      db.inverseRNs(range.first, range.second);
+      for (; db.hasRow(); db.advance()) {
+        folly::format(&record, "{},{}\n", db.currentPN(), db.currentRN());
+        if (record.size() > 1000) {
+          downstream_->sendBody(folly::IOBuf::copyBuffer(record));
+          record.clear();
+        }
+      }
+    }
+    if (!record.empty())
+      downstream_->sendBody(folly::IOBuf::copyBuffer(record));
+    downstream_->sendEOM();
   }
 
   void onQueryParam(StringPiece name, StringPiece value) {
-    if (name == "prefix%5B%5D" && value.size() <= 10) {
+    if (name == "prefix%5B%5D" || name == "prefix[]") {
       uint64_t from, to;
-      auto intValue = folly::tryTo<uint64_t>(value);
-      if (!intValue.hasValue())
+
+      if (value.size() > 10)
         return;
 
-      from = intValue.value();
-      to = from + 1;
+      if (auto asInt = folly::tryTo<uint64_t>(value))
+        from = asInt.value();
+      else
+        return;
 
+      to = from + 1;
       for (size_t i = 0; i < 10 - value.size(); ++i) {
         from *= 10;
         to *= 10;
@@ -188,7 +214,6 @@ class ReverseHandler final : public RequestHandler {
   }
 
   void onEOM() noexcept override {
-    ResponseBuilder(downstream_).sendWithEOM();
   }
 
   void onUpgrade(UpgradeProtocol proto) noexcept override {
@@ -205,7 +230,6 @@ class ReverseHandler final : public RequestHandler {
 
  private:
   std::vector<std::pair<uint64_t, uint64_t>> query_;
-  std::vector<uint64_t> resp_;
 };
 
 class ApiHandlerFactory : public RequestHandlerFactory {
