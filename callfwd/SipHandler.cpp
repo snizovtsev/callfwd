@@ -23,6 +23,7 @@ using folly::AsyncUDPSocket;
 using folly::EventBase;
 
 DEFINE_uint32(sip_max_length, 1500, "Maximum length of a SIP payload");
+DEFINE_bool(rfc4694, false, "Follow RFC4694 for non-ported numbers");
 
 inline StringPiece SP(str s) { return StringPiece(s.s, s.len); }
 
@@ -109,29 +110,25 @@ class SIPHandler : public AsyncUDPSocket::ReadCallback {
     }
 
     StringPiece user = SP(msg_.parsed_uri.user);
-    if (!(user.removePrefix("+1") || user.removePrefix("1"))) {
-      finishWithError();
-      return;
-    }
-    uint64_t userPhone;
-    if (auto result = folly::tryTo<uint64_t>(user)) {
-      userPhone = result.value();
-    } else {
-      finishWithError();
-      return;
-    }
-
-    uint64_t targetPhone = PhoneMapping::get().getRN(userPhone);
-    if (targetPhone == PhoneNumber::NOTFOUND)
-      targetPhone = userPhone;
-    std::string target = "+1";
-    target += folly::to<std::string>(targetPhone);
-
-    reply(302, "Moved Temporarily");
     StringPiece host = SP(msg_.parsed_uri.host);
     StringPiece port = SP(msg_.parsed_uri.port);
-    output("Contact: <sip:+1{};rn={};ndpi@{}:{}>\r\n",
-           user, target, host, port);
+
+    uint64_t pn = PhoneNumber::fromString(user);
+    uint64_t rn = PhoneNumber::NONE;
+    if (pn != PhoneNumber::NONE)
+      rn = PhoneMapping::get().getRN(pn);
+
+    reply(302, "Moved Temporarily");
+    if (rn != PhoneNumber::NONE) {
+      output("Contact: <sip:+1{};rn=+1{};ndpi@{}:{}>\r\n",
+             pn, rn, host, port);
+    } else if (FLAGS_rfc4694) {
+      output("Contact: <sip:{};ndpi@{}:{}>\r\n",
+             user, host, port);
+    } else {
+      output("Contact: <sip:{};rn={};ndpi@{}:{}>\r\n",
+             user, user, host, port);
+    }
     output("Location-Info: N\r\n");
     finish();
   }

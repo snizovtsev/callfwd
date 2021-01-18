@@ -9,6 +9,8 @@
 #endif
 #include <glog/logging.h>
 #include <folly/Likely.h>
+#include <folly/String.h>
+#include <folly/Conv.h>
 #include <folly/small_vector.h>
 #include <folly/container/F14Map.h>
 #include <folly/synchronization/Hazptr.h>
@@ -78,7 +80,7 @@ void PhoneMapping::Data::getRNs(size_t N, const uint64_t *pn, uint64_t *rn) cons
       if (it != dict.cend())
         rn[i] = it->second;
       else
-        rn[i] = PhoneNumber::NOTFOUND;
+        rn[i] = PhoneNumber::NONE;
     }
 
     pn += M;
@@ -301,4 +303,32 @@ PhoneMapping& PhoneMapping::advance() noexcept {
   if (!cursor_->hasRow())
     cursor_.reset();
   return *this;
+}
+
+uint64_t PhoneNumber::fromString(folly::StringPiece s)
+{
+  std::string digits;
+
+  // Remove punctuation
+  s = folly::trimWhitespace(s);
+  if (s.size() > 30) // Don't waste time on garbage
+    return NONE;
+
+  digits.reserve(s.size());
+  std::copy_if(s.begin(), s.end(), std::back_inserter(digits),
+               [](char c) { return strchr(" -()", c) == NULL; });
+  s = digits;
+
+  if (s.size() == 12) {
+    s.removePrefix("+1");
+  } else if (s.size() == 11) {
+    s.removePrefix("1");
+  }
+
+  if (s.size() != 10)
+    return NONE;
+
+  if (auto asInt = folly::tryTo<uint64_t>(s))
+    return asInt.value();
+  return NONE;
 }

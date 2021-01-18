@@ -14,7 +14,7 @@ static auto drain(PhoneMapping &db) {
 TEST(PhoneMappingTest, Empty) {
   PhoneMapping db = PhoneMapping::Builder().build();
   ASSERT_EQ(db.size(), 0);
-  ASSERT_EQ(db.getRN(555), PhoneNumber::NOTFOUND);
+  ASSERT_EQ(db.getRN(555), PhoneNumber::NONE);
   ASSERT_FALSE(db.visitRows().hasRow());
   ASSERT_FALSE(db.inverseRNs(111, 222).hasRow());
   folly::hazptr_cleanup();
@@ -26,7 +26,7 @@ TEST(PhoneMappingTest, One) {
     .build();
   ASSERT_EQ(db.size(), 1);
   ASSERT_EQ(db.getRN(555), 111);
-  ASSERT_EQ(db.getRN(666), PhoneNumber::NOTFOUND);
+  ASSERT_EQ(db.getRN(666), PhoneNumber::NONE);
   ASSERT_THAT(drain(db.visitRows()), ElementsAre(Pair(555, 111)));
   ASSERT_FALSE(db.inverseRNs(111, 111).hasRow());
   ASSERT_THAT(drain(db.inverseRNs(111, 112)), ElementsAre(Pair(555, 111)));
@@ -92,4 +92,24 @@ TEST(PhoneMappingTest, LastDigit) {
   ASSERT_EQ(drain(db.inverseRNs(2, 5)).size(), 90*3);
   ASSERT_EQ(drain(db.inverseRNs(8, 15)).size(), 90*2);
   folly::hazptr_cleanup();
+}
+
+TEST(PhoneNumberTest, Parse) {
+  ASSERT_EQ(PhoneNumber::fromString("+14844249683"), 4844249683);
+  ASSERT_EQ(PhoneNumber::fromString("14844249683"), 4844249683);
+  ASSERT_EQ(PhoneNumber::fromString("4844249683"), 4844249683);
+  ASSERT_EQ(PhoneNumber::fromString("  (484)-424-96-83  "), 4844249683);
+  ASSERT_EQ(PhoneNumber::fromString("+1484424968"), PhoneNumber::NONE);
+  ASSERT_EQ(PhoneNumber::fromString("1484424968"), 1484424968);
+  ASSERT_EQ(PhoneNumber::fromString("148-442-4968"), 1484424968);
+  ASSERT_EQ(PhoneNumber::fromString("+1 148-442-4968"), 1484424968);
+  ASSERT_EQ(PhoneNumber::fromString("+1 484-424-968"), PhoneNumber::NONE);
+  ASSERT_EQ(PhoneNumber::fromString("1 484-424-968"), 1484424968);
+  ASSERT_EQ(PhoneNumber::fromString("+8524844249683"), PhoneNumber::NONE);
+  ASSERT_EQ(PhoneNumber::fromString("8524844249683"), PhoneNumber::NONE);
+  ASSERT_EQ(PhoneNumber::fromString("+0123456789"), PhoneNumber::NONE);
+  ASSERT_EQ(PhoneNumber::fromString("+223456789"), PhoneNumber::NONE);
+  ASSERT_EQ(PhoneNumber::fromString("-223456789"), PhoneNumber::NONE);
+  ASSERT_EQ(PhoneNumber::fromString("-0123456789"), 123456789);
+  ASSERT_EQ(PhoneNumber::fromString("0x23456789"), PhoneNumber::NONE);
 }

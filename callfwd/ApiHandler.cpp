@@ -61,7 +61,7 @@ class TargetHandler final : public RequestHandler {
   void onQueryComplete() noexcept {
     for (uint64_t phone : query_) {
       uint64_t target = PhoneMapping::get().getRN(phone);
-      if (target != PhoneNumber::NOTFOUND)
+      if (target != PhoneNumber::NONE)
         resp_.push_back(target);
       else
         resp_.push_back(phone);

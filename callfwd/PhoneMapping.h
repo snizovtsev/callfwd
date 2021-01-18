@@ -5,12 +5,14 @@
 #include <limits>
 #include <cstddef>
 #include <atomic>
+#include <folly/Range.h>
 #include <folly/synchronization/HazptrHolder.h>
 
 class PhoneNumber {
 public:
-  static constexpr uint64_t NOTFOUND =
+  static constexpr uint64_t NONE =
     std::numeric_limits<uint64_t>::max();
+  static uint64_t fromString(folly::StringPiece s);
 };
 
 class PhoneMapping {
@@ -53,7 +55,7 @@ class PhoneMapping {
   size_t size() const noexcept;
 
   /** Get a routing number from portability number.
-    * If key wasn't found returns NOTFOUND. */
+    * If key wasn't found returns NONE. */
   uint64_t getRN(uint64_t pn) const;
 
   /** Get a routing number for a batch of keys.
