@@ -61,7 +61,7 @@ class SIPHandler : public AsyncUDPSocket::ReadCallback {
     reply_.clear();
 
     if (parseMessage(len, truncated) != 0) {
-      finishWithError();
+      LOG_FIRST_N(WARNING, 200) << "Bad SIP message received from " << peer_;
       return;
     }
 
@@ -70,12 +70,16 @@ class SIPHandler : public AsyncUDPSocket::ReadCallback {
 
     switch (msg_.REQ_METHOD) {
     case METHOD_OPTIONS:
-      replyAndFinish(200, "OK");
+      reply(200, "OK");
       break;
     case METHOD_INVITE:
       handleInvite();
       break;
     }
+
+    output("Content-Length: 0\r\n\r\n");
+    socket_.writeChain(peer_, reply_.move(), {});
+    log_.onResponse(status_, 0);
   }
 
   int parseMessage(size_t len, bool truncated) {
@@ -89,6 +93,8 @@ class SIPHandler : public AsyncUDPSocket::ReadCallback {
       return -1;
     if (msg_.first_line.type != SIP_REQUEST)
       return -1;
+    if (parse_sip_msg_uri(&msg_) != 0)
+      return -1;
 
     return 0;
   }
@@ -97,15 +103,10 @@ class SIPHandler : public AsyncUDPSocket::ReadCallback {
   {
     switch (checkACL(peer_.getIPAddress())) {
     case 429:
-      replyAndFinish(429, "Too Many Requests");
+      reply(429, "Too Many Requests");
       return;
     case 401:
-      replyAndFinish(401, "Unauthorized");
-      return;
-    }
-
-    if (parse_sip_msg_uri(&msg_) != 0) {
-      finishWithError();
+      reply(401, "Unauthorized");
       return;
     }
 
@@ -130,7 +131,6 @@ class SIPHandler : public AsyncUDPSocket::ReadCallback {
              user, user, host, port);
     }
     output("Location-Info: N\r\n");
-    finish();
   }
 
   void reply(uint64_t status, StringPiece message)
@@ -142,12 +142,6 @@ class SIPHandler : public AsyncUDPSocket::ReadCallback {
     outputHeader(msg_.to);
     outputHeader(msg_.callid);
     outputHeader(msg_.cseq);
-  }
-
-  void replyAndFinish(uint64_t status, StringPiece message)
-  {
-    reply(status, message);
-    finish();
   }
 
   void outputHeader(const struct hdr_field* hdr) {
@@ -162,16 +156,6 @@ class SIPHandler : public AsyncUDPSocket::ReadCallback {
     fmtbuf_.clear();
     folly::format(&fmtbuf_, fmt, std::forward<Args>(args)...);
     reply_.append(fmtbuf_);
-  }
-
-  void finishWithError() {
-    LOG_FIRST_N(WARNING, 200) << "Bad message received";
-  }
-
-  void finish() {
-    output("Content-Length: 0\r\n\r\n");
-    socket_.writeChain(peer_, reply_.move(), {});
-    log_.onResponse(status_, 0);
   }
 
  private:
