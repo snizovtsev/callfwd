@@ -21,9 +21,10 @@
 DEFINE_uint32(f14map_prefetch, 16, "Maximum number of keys to prefetch");
 
 struct PhoneList {
-  uint64_t phone;
-  PhoneList *next;
+  uint64_t phone : 34, next : 30;
 };
+static constexpr uint64_t MAXROWS = (1 << 30) - 1;
+static_assert(sizeof(PhoneList) == 8, "");
 
 class PhoneMapping::Data : public folly::hazptr_obj_base<PhoneMapping::Data> {
  public:
@@ -101,14 +102,16 @@ uint64_t PhoneMapping::getRN(uint64_t pn) const {
 
 class InverseRNVisitor final : public PhoneMapping::Cursor {
  public:
-  InverseRNVisitor(const PhoneMapping::Data *data, const PhoneList *it, const PhoneList *end)
-    : it_(it), end_(end)
+  InverseRNVisitor(const PhoneMapping::Data *data, uint64_t it, uint64_t end)
+    : base_(data->pnColumn.data())
+    , it_(it), end_(end)
   {
     prefetch(data);
   }
   void refill() override;
  private:
-  const PhoneList *it_, *end_;
+  const PhoneList *base_;
+  uint64_t it_, end_;
 };
 
 class RowVisitor final : public PhoneMapping::Cursor {
@@ -124,19 +127,18 @@ class RowVisitor final : public PhoneMapping::Cursor {
   Iterator it_, end_;
 };
 
-static inline bool operator< (const PhoneList &lhs, const PhoneList &rhs) {
-  return std::tie(lhs.phone, lhs.next) < std::tie(rhs.phone, rhs.next);
-}
-
 std::unique_ptr<PhoneMapping::Cursor>
 PhoneMapping::Data::inverseRNs(uint64_t fromRN, uint64_t toRN) const
 {
   std::vector<uint64_t> ret;
 
-  auto rnLeft = std::lower_bound(rnIndex.begin(), rnIndex.end(), PhoneList{fromRN, NULL});
-  auto rnRight = std::upper_bound(rnLeft, rnIndex.end(), PhoneList{toRN, NULL});
-  const PhoneList *pnBegin = rnLeft == rnIndex.end() ? nullptr : rnLeft->next;
-  const PhoneList *pnEnd = rnRight == rnIndex.end() ? nullptr : rnRight->next;
+  static auto cmp = [](const PhoneList &lhs, const PhoneList &rhs) {
+    return lhs.phone < rhs.phone;
+  };
+  auto rnLeft = std::lower_bound(rnIndex.begin(), rnIndex.end(), PhoneList{fromRN, 0}, cmp);
+  auto rnRight = std::lower_bound(rnLeft, rnIndex.end(), PhoneList{toRN, 0}, cmp);
+  uint64_t pnBegin = rnLeft == rnIndex.end() ? MAXROWS : rnLeft->next;
+  uint64_t pnEnd = rnRight == rnIndex.end() ? MAXROWS : rnRight->next;
 
   if (pnBegin != pnEnd)
     return std::make_unique<InverseRNVisitor>(this, pnBegin, pnEnd);
@@ -174,8 +176,8 @@ PhoneMapping&& PhoneMapping::visitRows() && {
 }
 
 void InverseRNVisitor::refill() {
-  for (; it_ != end_ && size_ < pn_.size(); it_ = it_->next) {
-    pn_[size_++] = it_->phone;
+  for (; it_ != end_ && size_ < pn_.size(); it_ = base_[it_].next) {
+    pn_[size_++] = base_[it_].phone;
   }
 }
 
@@ -214,10 +216,12 @@ PhoneMapping::Builder& PhoneMapping::Builder::addRow(uint64_t pn, uint64_t rn)
 {
   if (data_->dict.count(pn))
     throw std::runtime_error("PhoneMapping::Builder: duplicate key");
+  if (data_->pnColumn.size() >= MAXROWS)
+    throw std::runtime_error("PhoneMapping::Builder: too much rows");
 
   data_->dict.emplace(pn, rn);
-  data_->pnColumn.push_back(PhoneList{pn, NULL});
-  data_->rnIndex.push_back(PhoneList{rn, NULL});
+  data_->pnColumn.push_back(PhoneList{pn, MAXROWS});
+  data_->rnIndex.push_back(PhoneList{rn, MAXROWS});
   return *this;
 }
 
@@ -227,22 +231,28 @@ void PhoneMapping::Data::build()
 
   // Connect rnIndex_ with pnColumn_ before shuffling
   for (size_t i = 0; i < N; ++i)
-    rnIndex[i].next = &pnColumn[i];
+    rnIndex[i].next = i;
+
+  static auto cmp = [](const PhoneList &lhs, const PhoneList &rhs) {
+    if (lhs.phone == rhs.phone)
+      return lhs.next < rhs.next;
+    return lhs.phone < rhs.phone;
+  };
 
 #if HAVE_STD_PARALLEL
-  std::stable_sort(std::execution::par_unseq, rnIndex.begin(), rnIndex.end());
+  std::stable_sort(std::execution::par_unseq, rnIndex.begin(), rnIndex.end(), cmp);
 #else
-  std::stable_sort(rnIndex.begin(), rnIndex.end());
+  std::stable_sort(rnIndex.begin(), rnIndex.end(), cmp);
 #endif
 
   // Wire pnColumn_ list by target
   for (size_t i = 0; i + 1 < N; ++i)
-    rnIndex[i].next->next = rnIndex[i+1].next;
+    pnColumn[rnIndex[i].next].next = rnIndex[i+1].next;
 
-  static auto cmp = [](const PhoneList &lhs, const PhoneList &rhs) {
+  static auto equal = [](const PhoneList &lhs, const PhoneList &rhs) {
     return lhs.phone == rhs.phone;
   };
-  auto last = std::unique(rnIndex.begin(), rnIndex.end(), cmp);
+  auto last = std::unique(rnIndex.begin(), rnIndex.end(), equal);
   rnIndex.erase(last, rnIndex.end());
   rnIndex.shrink_to_fit();
 }
