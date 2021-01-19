@@ -9,6 +9,7 @@ int main(int argc, char* argv[]) {
   testing::InitGoogleTest(&argc, argv);
   google::InstallFailureSignalHandler();
   folly::Init init(&argc, &argv);
+  google::LogToStderr();
   int status = RUN_ALL_TESTS();
   folly::hazptr_cleanup();
   return status;

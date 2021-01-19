@@ -52,6 +52,7 @@ class AccessLogRotator : public folly::AsyncSignalHandler {
   void signalReceived(int /*signum*/) noexcept override
   {
     if (!FLAGS_access_log.empty()) {
+      LOG(INFO) << "Rotating access log files";
       auto logger = std::make_shared<folly::AsyncFileWriter>(FLAGS_access_log);
       accessLogWriter.exchange(std::move(logger));
     }
@@ -438,7 +439,12 @@ void startControlSocket(const char* initialDB) {
     LOG(WARNING) << "launched without systemd, control socket disabled";
     return;
   }
+
   google::AddLogSink(&journalSink);
+  for ( int i = 0; i < google::NUM_SEVERITIES; ++i ) {
+    google::SetLogDestination(i, "");     // "" turns off logging to a logfile
+  }
+
   int fd = SD_LISTEN_FDS_START + 0;
   std::thread(std::bind(controlThread, fd, initialDB))
      .detach();
