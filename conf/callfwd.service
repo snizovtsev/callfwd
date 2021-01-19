@@ -1,0 +1,12 @@
+[Unit]
+Description=Call forwarding daemon
+
+[Service]
+Restart=on-failure
+User=sergei
+Group=sergei
+StandardError=journal
+Environment=LD_LIBRARY_PATH=/home/sergei
+ExecStart=/home/sergei/callfwd \
+  -flagfile=/etc/callfwd.flags \
+  /tmp/20201218-lrn-bigdata.txt

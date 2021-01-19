@@ -1,0 +1,6 @@
+--threads=16
+--http_if1=::
+--http_if2=
+--sip_if1=0.0.0.0
+--sip_if2=::
+--access_log=/var/log/callfwd/access.log

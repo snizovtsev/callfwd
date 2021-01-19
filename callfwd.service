@@ -1,7 +1,0 @@
-[Unit]
-Description=Call forwarding daemon
-
-[Service]
-Restart=on-failure
-StandardError=journal
-ExecStart=/home/sergio/prj/callfwd/build/callfwd/callfwd /dev/null
