@@ -3,129 +3,52 @@
 #include <sys/un.h>
 #include <fstream>
 #include <functional>
-#include <iostream>
 #include <thread>
-#include <iomanip>
 #include <atomic>
 #include <systemd/sd-daemon.h>
 #include <systemd/sd-journal.h>
 #include <glog/logging.h>
 #include <folly/stop_watch.h>
-#include <folly/Synchronized.h>
 #include <folly/portability/Unistd.h>
 #include <folly/portability/SysStat.h>
 #include <folly/system/ThreadId.h>
 #include <folly/String.h>
 #include <folly/Conv.h>
-#include <folly/TokenBucket.h>
-#include <folly/IPAddress.h>
+#include <folly/Format.h>
 #include <proxygen/lib/utils/Time.h>
 
 #include "CallFwd.h"
 #include "PhoneMapping.h"
-
-using proxygen::SystemTimePoint;
-
-struct ACLRule {
-  SystemTimePoint created;
-  folly::Optional<SystemTimePoint> expire;
-  folly::TokenBucket callLimiter{1e10, 1e10};
-};
+#include "ACL.h"
 
 static std::atomic<PhoneMapping::Data*> currentMapping;
-static folly::Synchronized<std::shared_ptr<std::unordered_map<folly::IPAddress, ACLRule>>> ACLs;
+static std::atomic<ACL::Data*> currentACL;
 static constexpr auto reportInterval = std::chrono::seconds(30);
 
-PhoneMapping PhoneMapping::get() noexcept
-{
-  return {currentMapping};
-}
+PhoneMapping PhoneMapping::get() noexcept { return { currentMapping }; }
+bool PhoneMapping::isAvailable() noexcept { return !!currentMapping.load(); }
+ACL ACL::get() noexcept { return { currentACL }; }
 
-bool PhoneMapping::isAvailable() noexcept {
-  return !!currentMapping.load();
-}
-
-int checkACL(const folly::IPAddress &peer)
-{
-  auto acls = ACLs.copy();
-  if (!acls) return 401;
-
-  auto it = acls->find(peer);
-  if (it == acls->cend())
-    return 401;
-
-  auto& rule = it->second;
-
-  if (rule.expire && SystemTimePoint::clock::now() >= rule.expire.value())
-    return 401;
-
-  if (rule.callLimiter.consume(1))
-    return 200;
-  else
-    return 429;
-}
-
-static bool loadACLFile(int fd)
-{
-  using TAclMap =std::unordered_map<folly::IPAddress, ACLRule>;
-  TAclMap acl;
-  std::string line;
-  std::vector<std::string> row;
-  size_t nrows = 0;
-
-  std::string fname = "/proc/self/fd/";
-  fname += folly::to<std::string>(fd);
+static bool loadACLFile(int fd) {
+  std::string fname = folly::sformat("/proc/self/fd/{}", fd);
   std::ifstream in(fname);
+  size_t line = 0;
 
-  while (getline(in, line)) {
-    try {
-      folly::splitTo<std::string>(",", line, std::back_inserter(row));
-      folly::IPAddress ip(row[0]);
-
-      acl[ip] = {};
-
-      if (!row[1].empty()) {
-        std::tm tm = {};
-        std::stringstream ss(row[1]);
-        //2015-10-09 08:00:00+00
-        ss >> std::get_time(&tm, "%Y-%m-%d %H:%M:%S");
-        if (ss.fail())
-          throw std::runtime_error("failed parsing created_on time");
-        acl[ip].created = SystemTimePoint::clock::from_time_t(std::mktime(&tm));
-      }
-
-      if (!row[2].empty()) {
-        std::tm tm = {};
-        std::stringstream ss(row[2]);
-        //2015-10-09 08:00:00+00
-        ss >> std::get_time(&tm, "%Y-%m-%d %H:%M:%S");
-        if (ss.fail())
-          throw std::runtime_error("failed parsing expire time");
-        acl[ip].expire = SystemTimePoint::clock::from_time_t(std::mktime(&tm));
-        //std::cerr << acl[ip].expire.value() << std::endl;
-      }
-
-      if (auto cps = folly::tryTo<double>(row[3]))
-        acl[ip].callLimiter.reset(cps.value(), std::max(cps.value(), 1.));
-    } catch (std::exception& e) {
-      LOG(ERROR) << "ACLRead failed on line " << nrows << ": " << e.what();
-      in.close();
-      return false;
-    }
-    row.clear();
-    ++nrows;
-  }
-
-  if (!in.eof()) {
+  try {
+    auto data = ACL::fromCSV(in, &line);
+    if (in.bad())
+      throw std::runtime_error("i/o error");
     in.close();
-    LOG(ERROR) << "ACLRead failed on line " << nrows;
+
+    LOG(INFO) << "Replacing ACL (" << line << " rows)...";
+    ACL::commit(std::move(data), currentACL);
+    folly::hazptr_cleanup();
+    return true;
+  } catch (std::exception& e) {
+    in.close();
+    LOG(ERROR) << "Bad ACL on line " << line << ": " << e.what();
     return false;
   }
-  in.close();
-
-  LOG(INFO) << "Replacing ACL (" << nrows << " rows)...";
-  ACLs.exchange(std::make_shared<TAclMap>(std::move(acl)));
-  return true;
 }
 
 static bool loadMappingFile(std::ifstream &in, PhoneMapping::Builder &builder, size_t est)

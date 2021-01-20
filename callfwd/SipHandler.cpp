@@ -6,9 +6,9 @@
 #include <folly/io/IOBufQueue.h>
 #include <proxygen/httpserver/RequestHandlerFactory.h>
 
-#include "CallFwd.h"
 #include "PhoneMapping.h"
 #include "AccessLog.h"
+#include "ACL.h"
 
 extern "C" {
 #include <lib/osips_parser/msg_parser.h>
@@ -114,7 +114,7 @@ class SIPHandler : public AsyncUDPSocket::ReadCallback {
 
   void handleInvite()
   {
-    switch (checkACL(peer_.getIPAddress())) {
+    switch (ACL::get().isCallAllowed(peer_.getIPAddress())) {
     case 429:
       reply(429, "Too Many Requests");
       return;

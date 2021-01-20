@@ -18,7 +18,6 @@ namespace proxygen {
 }
 
 void startControlSocket(const char* initialDB);
-int checkACL(const folly::IPAddress &peer);
 
 std::unique_ptr<proxygen::RequestHandlerFactory>
 makeApiHandlerFactory();

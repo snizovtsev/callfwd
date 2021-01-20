@@ -3,6 +3,8 @@ set(SOURCES
   PhoneMapping.h
   AccessLog.cpp
   AccessLog.h
+  ACL.cpp
+  ACL.h
   ApiHandler.cpp
   SipHandler.cpp
   Control.cpp

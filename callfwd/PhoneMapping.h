@@ -1,4 +1,5 @@
-#pragma once
+#ifndef CALLFWD_PHONEMAPPING_H
+#define CALLFWD_PHONEMAPPING_H
 
 #include <cstdint>
 #include <memory>
@@ -90,3 +91,5 @@ class PhoneMapping {
   const Data *data_;
   std::unique_ptr<Cursor> cursor_;
 };
+
+#endif // CALLFWD_PHONEMAPPING_H
