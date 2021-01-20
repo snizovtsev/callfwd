@@ -5,6 +5,9 @@ import array
 import sys
 import os
 import tempfile
+import datetime
+import subprocess
+import tarfile
 import json
 
 
@@ -37,12 +40,24 @@ class CallFwdControl(object):
 
     def reload_db(self, new_db):
         msg = { "cmd": "reload" }
-        msg["row_estimate"] = os.stat(new_db).st_size / 23
+        msg["country"] = "US"
+        msg["loaded"] = str(datetime.datetime.now())
         msg["file_name"] = new_db
         msg["stdin"] = 0
-        with open(new_db, "r") as f:
-            self._make_request(msg, [f.fileno()])
-            self._wait_response()
+        if new_db.endswith(".tar.gz"):
+            with tarfile.open(new_db) as tar:
+                ti = tar.next()
+                msg["inner_name"] = ti.name
+                msg["row_estimate"] = ti.size // 23
+
+            shell = ["tar", "xOf", new_db, msg["inner_name"]]
+            with subprocess.Popen(shell, stdout=subprocess.PIPE) as p:
+                self._make_request(msg, [p.stdout.fileno()])
+        else:
+            msg["row_estimate"] = os.stat(new_db).st_size // 23
+            with open(new_db, "r") as f:
+                self._make_request(msg, [f.fileno()])
+        self._wait_response()
 
     def verify_db(self, backup_db):
         msg = { "cmd": "verify" }
@@ -50,7 +65,7 @@ class CallFwdControl(object):
         msg["stdin"] = 0
         with open(backup_db, "r") as f:
             self._make_request(msg, [f.fileno()])
-            self._wait_response()
+        self._wait_response()
 
     def dump_db(self, restored_db):
         msg = { "cmd": "dump" }
@@ -58,7 +73,7 @@ class CallFwdControl(object):
         msg["stdout"] = 0
         with open(restored_db, "w+") as f:
             self._make_request(msg [f.fileno()])
-            self._wait_response()
+        self._wait_response()
 
     def reload_acl(self, acl):
         msg = { "cmd": "acl" }
@@ -66,7 +81,12 @@ class CallFwdControl(object):
         msg["stdin"] = 0
         with open(acl, "r") as f:
             self._make_request(msg, [f.fileno()])
-            self._wait_response()
+        self._wait_response()
+
+    def status(self):
+        msg = { "cmd": "meta" }
+        self._make_request(msg, [])
+        self._wait_response()
 
 
 if __name__ == '__main__':
@@ -81,3 +101,5 @@ if __name__ == '__main__':
             ctl.dump_db(sys.argv[2])
         elif sys.argv[1] == 'acl':
             ctl.reload_acl(sys.argv[2])
+        elif sys.argv[1] == 'status':
+            ctl.status()
