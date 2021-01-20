@@ -128,8 +128,7 @@ class RowVisitor final : public PhoneMapping::Cursor {
 };
 
 std::unique_ptr<PhoneMapping::Cursor>
-PhoneMapping::Data::inverseRNs(uint64_t fromRN, uint64_t toRN) const
-{
+PhoneMapping::Data::inverseRNs(uint64_t fromRN, uint64_t toRN) const {
   std::vector<uint64_t> ret;
 
   static auto cmp = [](const PhoneList &lhs, const PhoneList &rhs) {
@@ -157,8 +156,7 @@ PhoneMapping&& PhoneMapping::inverseRNs(uint64_t fromRN, uint64_t toRN) && {
 }
 
 std::unique_ptr<PhoneMapping::Cursor>
-PhoneMapping::Data::visitRows() const
-{
+PhoneMapping::Data::visitRows() const {
   if (pnColumn.size() > 0)
     return std::make_unique<RowVisitor>(this, pnColumn.begin(), pnColumn.end());
   else
@@ -205,15 +203,13 @@ PhoneMapping::Builder::Builder()
 
 PhoneMapping::Builder::~Builder() noexcept = default;
 
-void PhoneMapping::Builder::sizeHint(size_t numRecords)
-{
+void PhoneMapping::Builder::sizeHint(size_t numRecords) {
   data_->pnColumn.reserve(numRecords);
   data_->rnIndex.reserve(numRecords);
   data_->dict.reserve(numRecords);
 }
 
-PhoneMapping::Builder& PhoneMapping::Builder::addRow(uint64_t pn, uint64_t rn)
-{
+PhoneMapping::Builder& PhoneMapping::Builder::addRow(uint64_t pn, uint64_t rn) {
   if (data_->dict.count(pn))
     throw std::runtime_error("PhoneMapping::Builder: duplicate key");
   if (data_->pnColumn.size() >= MAXROWS)
@@ -225,8 +221,7 @@ PhoneMapping::Builder& PhoneMapping::Builder::addRow(uint64_t pn, uint64_t rn)
   return *this;
 }
 
-void PhoneMapping::Data::build()
-{
+void PhoneMapping::Data::build() {
   size_t N = pnColumn.size();
 
   // Connect rnIndex_ with pnColumn_ before shuffling
@@ -257,16 +252,14 @@ void PhoneMapping::Data::build()
   rnIndex.shrink_to_fit();
 }
 
-PhoneMapping PhoneMapping::Builder::build()
-{
+PhoneMapping PhoneMapping::Builder::build() {
   auto data = std::make_unique<Data>();
   std::swap(data, data_);
   data->build();
   return PhoneMapping(std::move(data));
 }
 
-void PhoneMapping::Builder::commit(std::atomic<Data*> &global)
-{
+void PhoneMapping::Builder::commit(std::atomic<Data*> &global) {
   auto data = std::make_unique<Data>();
   std::swap(data, data_);
   data->build();
@@ -278,8 +271,7 @@ void PhoneMapping::Builder::commit(std::atomic<Data*> &global)
   LOG(INFO) << "Database updated: PNs=" << pn_count << " RNs=" << rn_count;
 }
 
-PhoneMapping::PhoneMapping(std::unique_ptr<Data> data)
-{
+PhoneMapping::PhoneMapping(std::unique_ptr<Data> data) {
   CHECK(FLAGS_f14map_prefetch > 0);
   holder_.reset(data.get());
   data->retire();
@@ -318,8 +310,7 @@ PhoneMapping& PhoneMapping::advance() noexcept {
   return *this;
 }
 
-uint64_t PhoneNumber::fromString(folly::StringPiece s)
-{
+uint64_t PhoneNumber::fromString(folly::StringPiece s) {
   std::string digits;
 
   // Remove punctuation
