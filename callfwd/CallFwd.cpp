@@ -33,7 +33,7 @@ int main(int argc, char* argv[]) {
   folly::Init init(&argc, &argv);
   google::InstallFailureSignalHandler();
   setlocale(LC_ALL, "C");
-  startControlSocket(argv[1]);
+  startControlSocket();
 
   CHECK(FLAGS_http_port < 65536);
   if (FLAGS_threads <= 0) {

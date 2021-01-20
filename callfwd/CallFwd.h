@@ -17,7 +17,7 @@ namespace proxygen {
   class RequestHandlerFactory;
 }
 
-void startControlSocket(const char* initialDB);
+void startControlSocket();
 
 std::unique_ptr<proxygen::RequestHandlerFactory>
 makeApiHandlerFactory();

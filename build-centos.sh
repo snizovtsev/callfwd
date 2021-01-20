@@ -19,4 +19,4 @@ ln -Tsf deps.arch deps
 
 rsync --info=progress2 \
     build.centos/callfwd/callfwd 147.135.46.46:~
-#rsync callfwdctl 147.135.46.46:~
+rsync callfwdctl 147.135.46.46:~

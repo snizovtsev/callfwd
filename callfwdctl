@@ -5,11 +5,14 @@ import array
 import sys
 import os
 import tempfile
+import json
 
 
-XDG_RUNTIME_DIR = os.getenv("XDG_RUNTIME_DIR")
-CALLFWD_SERVER_PATH = os.path.join(XDG_RUNTIME_DIR, "callfwd")
 CALLFWD_SERVER_PATH = "/run/callfwd"
+if not os.path.exists(CALLFWD_SERVER_PATH):
+    XDG_RUNTIME_DIR = os.getenv("XDG_RUNTIME_DIR")
+    CALLFWD_SERVER_PATH = os.path.join(XDG_RUNTIME_DIR, "callfwd")
+
 
 class CallFwdControl(object):
     def __init__(self, doorbell, server=None):
@@ -20,10 +23,11 @@ class CallFwdControl(object):
         sock.connect(server)
         self.sock = sock
 
-    def _make_request(self, cmd, fds):
-        cdata = array.array("i", [2] + fds)
+    def _make_request(self, msg, fds):
+        msg["stderr"] = len(fds)
+        cdata = array.array("i", fds + [2])
         cmsg = (socket.SOL_SOCKET, socket.SCM_RIGHTS, cdata)
-        self.sock.sendmsg([cmd], [cmsg])
+        self.sock.sendmsg([json.dumps(msg).encode('ascii')], [cmsg])
 
     def _wait_response(self):
         msg,_,_,_ = self.sock.recvmsg(10)
@@ -32,23 +36,36 @@ class CallFwdControl(object):
             exit(1)
 
     def reload_db(self, new_db):
+        msg = { "cmd": "reload" }
+        msg["row_estimate"] = os.stat(new_db).st_size / 23
+        msg["file_name"] = new_db
+        msg["stdin"] = 0
         with open(new_db, "r") as f:
-            self._make_request(b"LOAD_DB", [f.fileno()])
+            self._make_request(msg, [f.fileno()])
             self._wait_response()
 
     def verify_db(self, backup_db):
+        msg = { "cmd": "verify" }
+        msg["file_name"] = backup_db
+        msg["stdin"] = 0
         with open(backup_db, "r") as f:
-            self._make_request(b"VERIFY_DB", [f.fileno()])
+            self._make_request(msg, [f.fileno()])
             self._wait_response()
 
     def dump_db(self, restored_db):
+        msg = { "cmd": "dump" }
+        msg["file_name"] = restored_db
+        msg["stdout"] = 0
         with open(restored_db, "w+") as f:
-            self._make_request(b"DUMP_DB", [f.fileno()])
+            self._make_request(msg [f.fileno()])
             self._wait_response()
 
     def reload_acl(self, acl):
+        msg = { "cmd": "acl" }
+        msg["file_name"] = acl
+        msg["stdin"] = 0
         with open(acl, "r") as f:
-            self._make_request(b"LOAD_ACL", [f.fileno()])
+            self._make_request(msg, [f.fileno()])
             self._wait_response()
 
 

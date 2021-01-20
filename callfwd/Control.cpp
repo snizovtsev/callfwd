@@ -8,9 +8,10 @@
 #include <systemd/sd-daemon.h>
 #include <systemd/sd-journal.h>
 #include <glog/logging.h>
+#include <folly/dynamic.h>
+#include <folly/json.h>
 #include <folly/stop_watch.h>
-#include <folly/portability/Unistd.h>
-#include <folly/portability/SysStat.h>
+#include <folly/portability/GFlags.h>
 #include <folly/system/ThreadId.h>
 #include <folly/String.h>
 #include <folly/Format.h>
@@ -18,6 +19,8 @@
 #include "CallFwd.h"
 #include "PhoneMapping.h"
 #include "ACL.h"
+
+using folly::StringPiece;
 
 static std::atomic<PhoneMapping::Data*> currentMapping;
 static std::atomic<ACL::Data*> currentACL;
@@ -27,16 +30,41 @@ PhoneMapping PhoneMapping::get() noexcept { return { currentMapping }; }
 bool PhoneMapping::isAvailable() noexcept { return !!currentMapping.load(); }
 ACL ACL::get() noexcept { return { currentACL }; }
 
-static folly::StringPiece osBasename(folly::StringPiece path) {
+class ControlThread {
+ public:
+  ControlThread(int sockFd)
+    : sock_(sockFd)
+    , pktbuf_(1500, 'x')
+  {}
+
+  void operator()();
+  ssize_t awaitMessage();
+  char dispatch(folly::dynamic msg);
+  int argfd(int index);
+
+ private:
+  int sock_;
+  std::string pktbuf_;
+  alignas(struct cmsghdr) char cbuf_[256];
+
+  size_t peer_len_;
+  union {
+    struct sockaddr_un peer_un_;
+    struct sockaddr peer_;
+  };
+  folly::dynamic msg_;
+  std::vector<int> argfd_;
+};
+
+static StringPiece osBasename(StringPiece path) {
   auto idx = path.rfind('/');
-  if (idx == folly::StringPiece::npos) {
+  if (idx == StringPiece::npos) {
     return path.str();
   }
   return path.subpiece(idx + 1);
 }
 
-static bool loadACLFile(int fd) {
-  std::string path = folly::sformat("/proc/self/fd/{}", fd);
+static bool loadACLFile(const char *path) {
   std::unique_ptr<ACL::Data> data;
   std::ifstream in;
   size_t line = 0;
@@ -57,7 +85,7 @@ static bool loadACLFile(int fd) {
   return true;
 }
 
-static bool loadMappingFile(std::string path, size_t estimate)
+static bool loadMappingFile(const char *path, size_t estimate)
 {
   std::ifstream in;
   std::vector<char> rbuf(1ull << 19);
@@ -93,34 +121,8 @@ static bool loadMappingFile(std::string path, size_t estimate)
   return true;
 }
 
-static bool loadMappingFile(int fd)
+static bool verifyMappingFile(const char *path)
 {
-  struct stat s;
-  memset(&s, 0, sizeof(s));
-
-  size_t lineEstimate = 0;
-  if (fstat(fd, &s) == 0 && s.st_size > 1000)
-    lineEstimate = s.st_size / 23;
-
-  std::string path = folly::sformat("/proc/self/fd/{}", fd);
-  return loadMappingFile(path, lineEstimate);
-}
-
-static bool loadMappingFile(const char* fname)
-{
-  struct stat s;
-  memset(&s, 0, sizeof(s));
-
-  size_t lineEstimate = 0;
-  if (lstat(fname, &s) == 0 && s.st_size > 1000)
-    lineEstimate = s.st_size / 23;
-
-  return loadMappingFile(fname, lineEstimate);
-}
-
-static bool verifyMappingFile(int fd)
-{
-  std::string path = folly::sformat("/proc/self/fd/{}", fd);
   std::ifstream in;
   std::string linebuf;
   std::vector<uint64_t> row;
@@ -171,9 +173,8 @@ static bool verifyMappingFile(int fd)
   return true;
 }
 
-static bool dumpMappingFile(int fd)
+static bool dumpMappingFile(const char *path)
 {
-  std::string path = folly::sformat("/proc/self/fd/{}", fd);
   std::ofstream out;
 
   PhoneMapping db = PhoneMapping::get();
@@ -210,9 +211,12 @@ public:
   FdLogSink(int fd)
     : fd_(fd)
   {
+    AddLogSink(this);
   }
 
-  ~FdLogSink() override = default;
+  ~FdLogSink() override {
+    RemoveLogSink(this);
+  }
 
   void send(google::LogSeverity severity, const char* full_filename,
             const char* base_filename, int line,
@@ -248,84 +252,112 @@ public:
   }
 };
 
-static void controlThread(int sock, const char *initialDB) {
-  loadMappingFile(initialDB);
+ssize_t ControlThread::awaitMessage()
+{
+  struct iovec iov;
+  struct msghdr io;
 
-  std::string pkt(1500, 'x');
-  union {
-      char buf[256];
-      struct cmsghdr align;
-  } u;
+  iov.iov_base = pktbuf_.data();
+  iov.iov_len = pktbuf_.size();
+  io.msg_iov = &iov;
+  io.msg_iovlen = 1;
+  io.msg_name = &peer_un_;
+  io.msg_namelen = sizeof(peer_un_);
+  io.msg_flags = 0;
+  io.msg_control = cbuf_;
+  io.msg_controllen = sizeof(cbuf_);
 
-  struct iovec iov{pkt.data(), pkt.length()};
-  struct msghdr msg;
-  struct cmsghdr *c;
-  struct sockaddr_un peer;
+  ssize_t ret = recvmsg(sock_, &io, MSG_CMSG_CLOEXEC);
+  if (ret < 0) {
+    PLOG(WARNING) << "recvmsg";
+    return ret;
+  }
 
-  while (true) {
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
-    msg.msg_name = &peer;
-    msg.msg_namelen = sizeof(peer);
-    msg.msg_flags = 0;
-    msg.msg_control = u.buf;
-    msg.msg_controllen = sizeof(u.buf);
+  if (io.msg_namelen <= 0) {
+    LOG(WARNING) << "no reply address on a message";
+    return -1;
+  }
 
-    ssize_t ret = recvmsg(sock, &msg, MSG_CMSG_CLOEXEC);
-    if (ret <= 0) {
-      LOG(WARNING) << "Control socket error";
+  for (struct cmsghdr *c = CMSG_FIRSTHDR(&io); c != NULL; c = CMSG_NXTHDR(&io, c)) {
+    if (c->cmsg_len == 0)
+      continue;
+    if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_RIGHTS) {
+      argfd_.resize((c->cmsg_len - sizeof(struct cmsghdr)) / sizeof(int));
+      memcpy(argfd_.data(), CMSG_DATA(c), argfd_.size()*sizeof(int));
+      break;
+    }
+  }
+
+  peer_len_ = io.msg_namelen;
+  return ret;
+}
+
+int ControlThread::argfd(int index) {
+  if (index >= 0)
+    return argfd_.at(index);
+  else
+    return index;
+}
+
+char ControlThread::dispatch(folly::dynamic msg) {
+  std::unique_ptr<google::LogSink> sink;
+
+  const std::string &cmd = msg["cmd"].asString();
+  int stdin = argfd(msg.getDefault("stdin", -1).asInt());
+  std::string stdinPath = folly::sformat("/proc/self/fd/{}", stdin);
+  int stdout = argfd(msg.getDefault("stdout", -1).asInt());
+  std::string stdoutPath = folly::sformat("/proc/self/fd/{}", stdout);
+  int stderr = argfd(msg.getDefault("stderr", -1).asInt());
+
+  msg.erase("stdin");
+  msg.erase("stdout");
+  msg.erase("stderr");
+  msg.erase("cmd");
+
+  if (stderr >= 0)
+    sink.reset(new FdLogSink(stderr));
+
+  if (cmd == "reload") {
+    int64_t rowEstimate = msg.getDefault("row_estimate", 0).asInt();
+    if (loadMappingFile(stdinPath.c_str(), rowEstimate))
+      return 'S';
+  } else if (cmd == "verify") {
+    if (verifyMappingFile(stdinPath.c_str()))
+      return 'S';
+  } else if (cmd == "dump") {
+    if (dumpMappingFile(stdoutPath.c_str()))
+      return 'S';
+  } else if (cmd == "acl") {
+    if (loadACLFile(stdinPath.c_str()))
+      return 'S';
+  } else {
+    LOG(WARNING) << "Unrecognized command: " << cmd << "(fds: " << argfd_.size() << ")";
+  }
+  return 'F';
+}
+
+void ControlThread::operator()() {
+  while (true) try {
+    ssize_t bytes = awaitMessage();
+    if (bytes < 0) {
+      sleep(0.1);
       continue;
     }
 
-    folly::StringPiece cmd{pkt.data(), (size_t)ret};
-    std::vector<int> fds;
+    StringPiece body{pktbuf_.data(), (size_t)bytes};
+    char status = dispatch(folly::parseJson(body));
 
-    for (c = CMSG_FIRSTHDR(&msg); c != NULL; c = CMSG_NXTHDR(&msg, c)) {
-      if (c->cmsg_len == 0)
-        continue;
-      if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_RIGHTS) {
-        fds.resize((c->cmsg_len - sizeof(struct cmsghdr)) / sizeof(int));
-        memcpy(fds.data(), CMSG_DATA(c), fds.size()*sizeof(int));
-        break;
-      }
-    }
+    if (sendto(sock_, &status, 1, 0, &peer_, peer_len_) < 0)
+      PLOG(WARNING) << "sendto";
 
-    std::unique_ptr<google::LogSink> stderr;
-
-    if (fds.size() > 0) {
-      stderr.reset(new FdLogSink(fds[0]));
-      google::AddLogSink(stderr.get());
-    }
-
-    char success = 'F';
-    if (cmd == "LOAD_DB" && fds.size() == 2) {
-      if (loadMappingFile(fds[1]))
-        success = 'S';
-    } else if (cmd == "VERIFY_DB" && fds.size() == 2) {
-      if (verifyMappingFile(fds[1]))
-        success = 'S';
-    } else if (cmd == "DUMP_DB" && fds.size() == 2) {
-      if (dumpMappingFile(fds[1]))
-        success = 'S';
-    } else if (cmd == "LOAD_ACL" && fds.size() == 2) {
-      if (loadACLFile(fds[1]))
-        success = 'S';
-    } else {
-      LOG(WARNING) << "Unrecognized command: " << cmd << "(fds: " << fds.size() << ")";
-    }
-
-    if (msg.msg_namelen > 0) {
-      if (sendto(sock, &success, 1, 0, (struct sockaddr*)&peer, msg.msg_namelen) < 0)
-        PLOG(WARNING) << "sendto";
-    }
-
-    google::RemoveLogSink(stderr.get());
-    for (int fd : fds)
+    for (int fd : argfd_)
       close(fd);
+  } catch (std::exception& e) {
+    LOG(ERROR) << "Bad message: " << e.what();
   }
 }
 
-void startControlSocket(const char* initialDB) {
+void startControlSocket() {
   static JournaldSink journalSink;
   if (sd_listen_fds(0) != 1) {
     LOG(WARNING) << "launched without systemd, control socket disabled";
@@ -339,7 +371,6 @@ void startControlSocket(const char* initialDB) {
   }
   google::SetStderrLogging(google::FATAL);
 
-  int fd = SD_LISTEN_FDS_START + 0;
-  std::thread(std::bind(controlThread, fd, initialDB))
-     .detach();
+  int sockFd = SD_LISTEN_FDS_START + 0;
+  std::thread(ControlThread(sockFd)).detach();
 }
