@@ -129,6 +129,7 @@ class AccessLogRotator : public folly::AsyncSignalHandler {
 
   ~AccessLogRotator() {
     if (auto veteran = accessLog.exchange(nullptr)) {
+      LOG(INFO) << "Flushing access log";
       veteran->flush();
       veteran->retire();
     }

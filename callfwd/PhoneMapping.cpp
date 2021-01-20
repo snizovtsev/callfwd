@@ -270,8 +270,12 @@ void PhoneMapping::Builder::commit(std::atomic<Data*> &global)
   auto data = std::make_unique<Data>();
   std::swap(data, data_);
   data->build();
+
+  size_t pn_count = data->pnColumn.size();
+  size_t rn_count = data->rnIndex.size();
   if (Data *veteran = global.exchange(data.release()))
     veteran->retire();
+  LOG(INFO) << "Database updated: PNs=" << pn_count << " RNs=" << rn_count;
 }
 
 PhoneMapping::PhoneMapping(std::unique_ptr<Data> data)

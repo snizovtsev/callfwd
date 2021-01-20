@@ -10,6 +10,7 @@
 #include <systemd/sd-daemon.h>
 #include <systemd/sd-journal.h>
 #include <glog/logging.h>
+#include <folly/stop_watch.h>
 #include <folly/Synchronized.h>
 #include <folly/portability/Unistd.h>
 #include <folly/portability/SysStat.h>
@@ -33,6 +34,7 @@ struct ACLRule {
 
 static std::atomic<PhoneMapping::Data*> currentMapping;
 static folly::Synchronized<std::shared_ptr<std::unordered_map<folly::IPAddress, ACLRule>>> ACLs;
+static constexpr auto reportInterval = std::chrono::seconds(30);
 
 PhoneMapping PhoneMapping::get() noexcept
 {
@@ -126,25 +128,32 @@ static bool loadACLFile(int fd)
   return true;
 }
 
-static bool loadMappingFile(std::ifstream &in, PhoneMapping::Builder &builder)
+static bool loadMappingFile(std::ifstream &in, PhoneMapping::Builder &builder, size_t est)
 {
   std::vector<char> rbuf(1ull << 19);
   std::string line;
-  std::vector<uint64_t> row;
+  std::vector<uint64_t> rowbuf;
+  folly::stop_watch<> watch;
   size_t nrows = 0;
 
   in.rdbuf()->pubsetbuf(rbuf.data(), rbuf.size());
-  while (getline(in, line)) {
-    try {
-      folly::splitTo<uint64_t>(",", line, std::back_inserter(row));
-      builder.addRow(row[0], row[1]);
-    } catch (std::runtime_error& e) {
-      LOG(ERROR) << "Read failed on line " << nrows << ": " << e.what();
-      in.close();
-      return false;
+  while (getline(in, line)) try {
+    if ((nrows & 0xfff) == 0xfff && watch.lap(reportInterval)) {
+      if (est != 0) {
+        LOG(INFO) << nrows * 100 / est << "% completed";
+      } else {
+        LOG(INFO) << nrows << " rows read";
+      }
     }
-    row.clear();
+
+    folly::splitTo<uint64_t>(",", line, std::back_inserter(rowbuf));
+    builder.addRow(rowbuf[0], rowbuf[1]);
+    rowbuf.clear();
     ++nrows;
+  } catch (std::runtime_error& e) {
+    LOG(ERROR) << "Read failed on line " << nrows << ": " << e.what();
+    in.close();
+    return false;
   }
 
   if (!in.eof()) {
@@ -173,16 +182,17 @@ static bool loadMappingFile(int fd)
   struct stat s;
   memset(&s, 0, sizeof(s));
 
+  size_t lineEstimate = 0;
   if (fstat(fd, &s) == 0) {
     if (s.st_size > 1000) {
-      size_t lineEstimate = s.st_size / 23;
+      lineEstimate = s.st_size / 23;
       builder.sizeHint(lineEstimate + lineEstimate / 10);
       LOG(INFO) << "Estimated number of lines: " << lineEstimate;
     }
   }
 
   LOG(INFO) << "Reloading database";
-  return loadMappingFile(in, builder);
+  return loadMappingFile(in, builder, lineEstimate);
 }
 
 static bool loadMappingFile(const char* fname)
@@ -194,16 +204,17 @@ static bool loadMappingFile(const char* fname)
   struct stat s;
   memset(&s, 0, sizeof(s));
 
+  size_t lineEstimate = 0;
   if (lstat(fname, &s) == 0) {
     if (s.st_size > 1000) {
-      size_t lineEstimate = s.st_size / 23;
+      lineEstimate = s.st_size / 23;
       builder.sizeHint(lineEstimate + lineEstimate / 10);
       LOG(INFO) << "Estimated number of lines: " << lineEstimate;
     }
   }
 
   LOG(INFO) << "Reading database from " << fname << " ...";
-  return loadMappingFile(in, builder);
+  return loadMappingFile(in, builder, lineEstimate);
 }
 
 static bool verifyMappingFile(int fd)
@@ -218,23 +229,32 @@ static bool verifyMappingFile(int fd)
   PhoneMapping db = PhoneMapping::get();
   std::string line;
   std::vector<uint64_t> row;
+  folly::stop_watch<> watch;
   size_t nrows = 0;
+  size_t maxdiff = 100;
 
-  while (getline(in, line)) {
-    try {
-      folly::splitTo<uint64_t>(",", line, std::back_inserter(row));
-    } catch (std::runtime_error& e) {
-      LOG(ERROR) << "Read failed on line " << nrows << ": " << e.what();
-      in.close();
-      return false;
+  while (getline(in, line)) try {
+    if ((nrows & 0xfff) == 0xfff && watch.lap(reportInterval)) {
+      if (db.size() != 0) {
+        LOG(INFO) << nrows * 100 / db.size() << "% completed";
+      }
     }
 
+    folly::splitTo<uint64_t>(",", line, std::back_inserter(row));
     if (db.getRN(row[0]) != row[1]) {
       LOG(ERROR) << (nrows+1) << ": key " << row[0] << " differs";
+      if (--maxdiff == 0) {
+        LOG(ERROR) << "Diff limit reached, stopping";
+        in.close();
+        return false;
+      }
     }
-
     row.clear();
     ++nrows;
+  } catch (std::runtime_error& e) {
+    LOG(ERROR) << "Read failed on line " << nrows << ": " << e.what();
+    in.close();
+    return false;
   }
 
   if (!in.eof()) {
@@ -249,6 +269,7 @@ static bool verifyMappingFile(int fd)
   }
 
   in.close();
+  LOG(INFO) << "Loaded database matches file";
   return true;
 }
 
@@ -259,12 +280,19 @@ static bool dumpMappingFile(int fd)
   std::ofstream out(fname);
 
   LOG(INFO) << "Dumping database";
+  folly::stop_watch<> watch;
   size_t nrows = 0;
 
   for (PhoneMapping db = PhoneMapping::get().visitRows();
        out.good() && db.hasRow(); db.advance())
     {
+      if ((nrows & 0xfff) == 0xfff && watch.lap(reportInterval)) {
+        if (db.size() != 0) {
+          LOG(INFO) << nrows * 100 / db.size() << "% completed";
+        }
+      }
       out << db.currentPN() << "," << db.currentRN() << "\r\n";
+      ++nrows;
     }
 
   out.flush();
@@ -275,6 +303,8 @@ static bool dumpMappingFile(int fd)
   }
 
   out.close();
+
+  LOG(INFO) << "Dump completed";
   return true;
 }
 
