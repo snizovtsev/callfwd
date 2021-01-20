@@ -6,6 +6,8 @@
 #include <limits>
 #include <cstddef>
 #include <atomic>
+#include <istream>
+
 #include <folly/Range.h>
 #include <folly/synchronization/HazptrHolder.h>
 
@@ -32,6 +34,9 @@ class PhoneMapping {
     /** Add a new row into the scratch buffer.
       * Throws `runtime_error` if key already exists. */
     Builder& addRow(uint64_t pn, uint64_t rn);
+
+    /** Add many rows from CSV text stream. */
+    void fromCSV(std::istream &in, size_t& line, size_t limit);
 
     /** Build indexes and release the data. */
     PhoneMapping build();

@@ -221,6 +221,23 @@ PhoneMapping::Builder& PhoneMapping::Builder::addRow(uint64_t pn, uint64_t rn) {
   return *this;
 }
 
+void PhoneMapping::Builder::fromCSV(std::istream &in, size_t &line, size_t limit) {
+  std::string linebuf;
+  std::vector<uint64_t> rowbuf;
+
+  for (limit += line; line < limit; ++line) {
+    if (in.peek() == EOF)
+      break;
+    std::getline(in, linebuf);
+    rowbuf.clear();
+    folly::split(',', linebuf, rowbuf);
+    if (rowbuf.size() == 2)
+      addRow(rowbuf[0], rowbuf[1]);
+    else
+      throw std::runtime_error("bad number of columns");
+  }
+}
+
 void PhoneMapping::Data::build() {
   size_t N = pnColumn.size();
 

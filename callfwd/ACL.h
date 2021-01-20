@@ -27,7 +27,7 @@ class ACL {
   int isCallAllowed(const folly::IPAddress &peer) const;
 
   /* Construct Data from CSV stream */
-  static std::unique_ptr<ACL::Data> fromCSV(std::istream &in, size_t *line);
+  static std::unique_ptr<ACL::Data> fromCSV(std::istream &in, size_t &line);
 
   /* Exchange current ACL with global */
   static void commit(std::unique_ptr<ACL::Data> recruit,

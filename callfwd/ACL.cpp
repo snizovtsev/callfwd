@@ -50,36 +50,35 @@ int ACL::isCallAllowed(const IPAddress &peer) const
 static SystemTimePoint parsePostgresTime(std::string value) {
   std::tm tm = {};
   std::stringstream ss(std::move(value));
+  ss.exceptions(std::ios_base::failbit);
   //2015-10-09 08:00:00+00
   ss >> std::get_time(&tm, "%Y-%m-%d %H:%M:%S");
-  if (ss.fail())
-    throw std::runtime_error("bad datetime value");
   return SystemTimePoint::clock::from_time_t(std::mktime(&tm));
 }
 
-std::unique_ptr<ACL::Data> ACL::fromCSV(std::istream &in, size_t* line) {
+std::unique_ptr<ACL::Data> ACL::fromCSV(std::istream &in, size_t& line) {
   std::string linebuf;
   std::vector<folly::StringPiece> row;
   auto data = std::make_unique<Data>();
+  ACL::Rule rule;
 
-  while (std::getline(in, linebuf)) {
-    if (linebuf.empty())
-      continue;
-
-    ACL::Rule rule;
+  while (in.peek() != EOF) {
     row.clear();
+    std::getline(in, linebuf);
     folly::split(',', linebuf, row);
+    ++line;
 
-    if (!row[1].empty())
-      rule.created = parsePostgresTime(row[1].str());
-    if (!row[2].empty())
-      rule.expire = parsePostgresTime(row[2].str());
-    if (auto cps = folly::tryTo<double>(row[3]))
-      rule.callBudget.reset(*cps, std::max(*cps, 1.));
-    data->origin[folly::IPAddress(row[0])] = std::move(rule);
-
-    if (line)
-      *line += 1;
+    if (row.size() == 4) {
+      if (!row[1].empty())
+        rule.created = parsePostgresTime(row[1].str());
+      if (!row[2].empty())
+        rule.expire = parsePostgresTime(row[2].str());
+      if (auto cps = folly::tryTo<double>(row[3]))
+        rule.callBudget.reset(*cps, std::max(*cps, 1.));
+      data->origin[folly::IPAddress(row[0])] = std::move(rule);
+    } else {
+      throw std::runtime_error("bad number of columns");
+    }
   }
 
   return data;
