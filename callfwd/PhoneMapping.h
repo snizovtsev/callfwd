@@ -11,6 +11,8 @@
 #include <folly/Range.h>
 #include <folly/synchronization/HazptrHolder.h>
 
+namespace folly { struct dynamic; }
+
 class PhoneNumber {
 public:
   static constexpr uint64_t NONE =
@@ -27,6 +29,9 @@ class PhoneMapping {
   public:
     Builder();
     ~Builder() noexcept;
+
+    /** Attach arbitrary metadata. */
+    void setMetadata(const folly::dynamic &meta);
 
     /** Preallocate memory for expected number of records. */
     void sizeHint(size_t numRecords);
@@ -61,6 +66,9 @@ class PhoneMapping {
 
   /** Get total number of records */
   size_t size() const noexcept;
+
+  /** Log metadata to system journal */
+  void printMetadata();
 
   /** Get a routing number from portability number.
     * If key wasn't found returns NONE. */

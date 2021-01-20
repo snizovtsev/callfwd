@@ -64,7 +64,7 @@ static StringPiece osBasename(StringPiece path) {
   return path.subpiece(idx + 1);
 }
 
-static bool loadACLFile(const char *path) {
+static bool loadACLFile(const std::string &path) {
   std::unique_ptr<ACL::Data> data;
   std::ifstream in;
   size_t line = 0;
@@ -85,11 +85,15 @@ static bool loadACLFile(const char *path) {
   return true;
 }
 
-static bool loadMappingFile(const char *path, size_t estimate)
+static bool loadMappingFile(const std::string &path, folly::dynamic meta)
 {
+  int64_t estimate = meta.getDefault("row_estimate", 0).asInt();
+  const std::string &name = meta.getDefault("file_name", path).asString();
+
   std::ifstream in;
   std::vector<char> rbuf(1ull << 19);
   folly::stop_watch<> watch;
+
   PhoneMapping::Builder builder;
   size_t nrows = 0;
 
@@ -99,7 +103,9 @@ static bool loadMappingFile(const char *path, size_t estimate)
     in.open(path);
 
     builder.sizeHint(estimate + estimate / 20);
-    LOG(INFO) << "Reading database from " << osBasename(path)
+    builder.setMetadata(meta);
+
+    LOG(INFO) << "Reading database from " << name
       << " (" << estimate << " rows estimated)";
 
     while (in.good()) {
@@ -111,7 +117,7 @@ static bool loadMappingFile(const char *path, size_t estimate)
     }
     in.close();
   } catch (std::runtime_error &e) {
-    LOG(ERROR) << osBasename(path) << ':' << nrows << ": " << e.what();
+    LOG(ERROR) << osBasename(name) << ':' << nrows << ": " << e.what();
     return false;
   }
 
@@ -121,7 +127,7 @@ static bool loadMappingFile(const char *path, size_t estimate)
   return true;
 }
 
-static bool verifyMappingFile(const char *path)
+static bool verifyMappingFile(const std::string &path)
 {
   std::ifstream in;
   std::string linebuf;
@@ -173,7 +179,7 @@ static bool verifyMappingFile(const char *path)
   return true;
 }
 
-static bool dumpMappingFile(const char *path)
+static bool dumpMappingFile(const std::string &path)
 {
   std::ofstream out;
 
@@ -318,18 +324,20 @@ char ControlThread::dispatch(folly::dynamic msg) {
     sink.reset(new FdLogSink(stderr));
 
   if (cmd == "reload") {
-    int64_t rowEstimate = msg.getDefault("row_estimate", 0).asInt();
-    if (loadMappingFile(stdinPath.c_str(), rowEstimate))
+    if (loadMappingFile(stdinPath, msg))
       return 'S';
   } else if (cmd == "verify") {
-    if (verifyMappingFile(stdinPath.c_str()))
+    if (verifyMappingFile(stdinPath))
       return 'S';
   } else if (cmd == "dump") {
-    if (dumpMappingFile(stdoutPath.c_str()))
+    if (dumpMappingFile(stdoutPath))
       return 'S';
   } else if (cmd == "acl") {
-    if (loadACLFile(stdinPath.c_str()))
+    if (loadACLFile(stdinPath))
       return 'S';
+  } else if (cmd == "meta") {
+    PhoneMapping::get().printMetadata();
+    return 'S';
   } else {
     LOG(WARNING) << "Unrecognized command: " << cmd << "(fds: " << argfd_.size() << ")";
   }

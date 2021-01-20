@@ -8,6 +8,8 @@
 #include <execution>
 #endif
 #include <glog/logging.h>
+#include <folly/json.h>
+#include <folly/dynamic.h>
 #include <folly/Likely.h>
 #include <folly/String.h>
 #include <folly/Conv.h>
@@ -34,6 +36,8 @@ class PhoneMapping::Data : public folly::hazptr_obj_base<PhoneMapping::Data> {
   void build();
   ~Data() noexcept;
 
+  // metadata
+  folly::dynamic meta;
   // pn->rn mapping
   folly::F14ValueMap<uint64_t, uint64_t> dict;
   // pn column joined with sorted rn column
@@ -209,6 +213,10 @@ void PhoneMapping::Builder::sizeHint(size_t numRecords) {
   data_->dict.reserve(numRecords);
 }
 
+void PhoneMapping::Builder::setMetadata(const folly::dynamic &meta) {
+  data_->meta = meta;
+}
+
 PhoneMapping::Builder& PhoneMapping::Builder::addRow(uint64_t pn, uint64_t rn) {
   if (data_->dict.count(pn))
     throw std::runtime_error("PhoneMapping::Builder: duplicate key");
@@ -303,6 +311,15 @@ PhoneMapping::PhoneMapping(std::atomic<Data*> &global)
 
 PhoneMapping::PhoneMapping(PhoneMapping&& rhs) noexcept = default;
 PhoneMapping::~PhoneMapping() noexcept = default;
+
+void PhoneMapping::printMetadata() {
+  if (!data_)
+    return;
+  LOG(INFO) << "Current mapping info:";
+  for (auto kv : data_->meta.items())
+    LOG(INFO) << "  " << kv.first.asString()
+                  << ": " << folly::toJson(kv.second);
+}
 
 size_t PhoneMapping::size() const noexcept {
   return data_->pnColumn.size();
