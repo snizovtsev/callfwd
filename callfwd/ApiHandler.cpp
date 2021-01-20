@@ -14,7 +14,7 @@
 #include <proxygen/httpserver/filters/DirectResponseHandler.h>
 
 #include "PhoneMapping.h"
-#include "CallFwd.h"
+#include "AccessLog.h"
 
 using namespace proxygen;
 using folly::StringPiece;

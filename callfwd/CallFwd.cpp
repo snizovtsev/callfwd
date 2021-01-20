@@ -8,6 +8,7 @@
 #include <proxygen/httpserver/HTTPServer.h>
 
 #include "CallFwd.h"
+#include "AccessLog.h"
 
 using proxygen::HTTPServer;
 using proxygen::HTTPServerOptions;

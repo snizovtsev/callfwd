@@ -1,9 +1,10 @@
 set(SOURCES
   PhoneMapping.cpp
   PhoneMapping.h
+  AccessLog.cpp
+  AccessLog.h
   ApiHandler.cpp
   SipHandler.cpp
-  AccessLogHandler.cpp
   Control.cpp
   CallFwd.cpp
   )

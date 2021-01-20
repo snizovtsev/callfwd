@@ -8,6 +8,7 @@
 
 #include "CallFwd.h"
 #include "PhoneMapping.h"
+#include "AccessLog.h"
 
 extern "C" {
 #include <lib/osips_parser/msg_parser.h>

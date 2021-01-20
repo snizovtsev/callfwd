@@ -7,7 +7,6 @@
 #include <thread>
 #include <iomanip>
 #include <atomic>
-#include <sys/signal.h>
 #include <systemd/sd-daemon.h>
 #include <systemd/sd-journal.h>
 #include <glog/logging.h>
@@ -19,16 +18,12 @@
 #include <folly/Conv.h>
 #include <folly/TokenBucket.h>
 #include <folly/IPAddress.h>
-#include <folly/logging/AsyncFileWriter.h>
-#include <folly/io/async/AsyncSignalHandler.h>
 #include <proxygen/lib/utils/Time.h>
 
 #include "CallFwd.h"
 #include "PhoneMapping.h"
 
 using proxygen::SystemTimePoint;
-
-DEFINE_string(access_log, "/tmp/callfwd.log", "An access log file");
 
 struct ACLRule {
   SystemTimePoint created;
@@ -38,31 +33,6 @@ struct ACLRule {
 
 static std::atomic<PhoneMapping::Data*> currentMapping;
 static folly::Synchronized<std::shared_ptr<std::unordered_map<folly::IPAddress, ACLRule>>> ACLs;
-static folly::Synchronized<std::shared_ptr<folly::AsyncFileWriter>> accessLogWriter;
-
-class AccessLogRotator : public folly::AsyncSignalHandler {
- public:
-  explicit AccessLogRotator(folly::EventBase *evb)
-    : folly::AsyncSignalHandler(evb)
-  {
-    signalReceived(0);
-    registerSignalHandler(SIGHUP);
-  }
-
-  void signalReceived(int /*signum*/) noexcept override
-  {
-    if (!FLAGS_access_log.empty()) {
-      LOG(INFO) << "Rotating access log files";
-      auto logger = std::make_shared<folly::AsyncFileWriter>(FLAGS_access_log);
-      accessLogWriter.exchange(std::move(logger));
-    }
-  }
-};
-
-std::shared_ptr<AccessLogRotator> makeAccessLogRotator(folly::EventBase *evb)
-{
-  return std::make_shared<AccessLogRotator>(evb);
-}
 
 PhoneMapping PhoneMapping::get() noexcept
 {
@@ -71,11 +41,6 @@ PhoneMapping PhoneMapping::get() noexcept
 
 bool PhoneMapping::isAvailable() noexcept {
   return !!currentMapping.load();
-}
-
-std::shared_ptr<folly::LogWriter> getAccessLogWriter()
-{
-  return accessLogWriter.copy();
 }
 
 int checkACL(const folly::IPAddress &peer)
