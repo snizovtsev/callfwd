@@ -30,32 +30,6 @@ PhoneMapping PhoneMapping::get() noexcept { return { currentMapping }; }
 bool PhoneMapping::isAvailable() noexcept { return !!currentMapping.load(); }
 ACL ACL::get() noexcept { return { currentACL }; }
 
-class ControlThread {
- public:
-  ControlThread(int sockFd)
-    : sock_(sockFd)
-    , pktbuf_(1500, 'x')
-  {}
-
-  void operator()();
-  ssize_t awaitMessage();
-  char dispatch(folly::dynamic msg);
-  int argfd(int index);
-
- private:
-  int sock_;
-  std::string pktbuf_;
-  alignas(struct cmsghdr) char cbuf_[256];
-
-  size_t peer_len_;
-  union {
-    struct sockaddr_un peer_un_;
-    struct sockaddr peer_;
-  };
-  folly::dynamic msg_;
-  std::vector<int> argfd_;
-};
-
 static StringPiece osBasename(StringPiece path) {
   auto idx = path.rfind('/');
   if (idx == StringPiece::npos) {
@@ -258,6 +232,36 @@ public:
   }
 };
 
+class ControlThread {
+ public:
+  ControlThread(int sockFd)
+    : sock_(sockFd)
+    , pktbuf_(1500, 'x')
+  {}
+
+  struct sockaddr_t {
+    union {
+      struct sockaddr_un addr_un;
+      struct sockaddr addr;
+    };
+    size_t addr_len;
+  };
+
+  void operator()();
+  ssize_t awaitMessage();
+  void dispatch(sockaddr_t peer, folly::dynamic msg,
+                std::vector<int> argfd) const noexcept;
+
+ private:
+  int sock_;
+  std::string pktbuf_;
+  sockaddr_t peer_;
+  alignas(struct cmsghdr) char cbuf_[256];
+
+  folly::dynamic msg_;
+  std::vector<int> argfd_;
+};
+
 ssize_t ControlThread::awaitMessage()
 {
   struct iovec iov;
@@ -267,8 +271,8 @@ ssize_t ControlThread::awaitMessage()
   iov.iov_len = pktbuf_.size();
   io.msg_iov = &iov;
   io.msg_iovlen = 1;
-  io.msg_name = &peer_un_;
-  io.msg_namelen = sizeof(peer_un_);
+  io.msg_name = &peer_.addr_un;
+  io.msg_namelen = sizeof(peer_.addr_un);
   io.msg_flags = 0;
   io.msg_control = cbuf_;
   io.msg_controllen = sizeof(cbuf_);
@@ -294,26 +298,23 @@ ssize_t ControlThread::awaitMessage()
     }
   }
 
-  peer_len_ = io.msg_namelen;
+  peer_.addr_len = io.msg_namelen;
   return ret;
 }
 
-int ControlThread::argfd(int index) {
-  if (index >= 0)
-    return argfd_.at(index);
-  else
-    return index;
-}
-
-char ControlThread::dispatch(folly::dynamic msg) {
+void ControlThread::dispatch(sockaddr_t peer, folly::dynamic msg,
+                             std::vector<int> argfd) const noexcept
+try {
   std::unique_ptr<google::LogSink> sink;
 
+  auto mapfd = [&](int index) { return (index >= 0) ? argfd.at(index) : index; };
+
   const std::string &cmd = msg["cmd"].asString();
-  int stdin = argfd(msg.getDefault("stdin", -1).asInt());
+  int stdin = mapfd(msg.getDefault("stdin", -1).asInt());
   std::string stdinPath = folly::sformat("/proc/self/fd/{}", stdin);
-  int stdout = argfd(msg.getDefault("stdout", -1).asInt());
+  int stdout = mapfd(msg.getDefault("stdout", -1).asInt());
   std::string stdoutPath = folly::sformat("/proc/self/fd/{}", stdout);
-  int stderr = argfd(msg.getDefault("stderr", -1).asInt());
+  int stderr = mapfd(msg.getDefault("stderr", -1).asInt());
 
   msg.erase("stdin");
   msg.erase("stdout");
@@ -323,26 +324,34 @@ char ControlThread::dispatch(folly::dynamic msg) {
   if (stderr >= 0)
     sink.reset(new FdLogSink(stderr));
 
+  char status = 'F';
   if (cmd == "reload") {
     if (loadMappingFile(stdinPath, msg))
-      return 'S';
+      status = 'S';
   } else if (cmd == "verify") {
     if (verifyMappingFile(stdinPath))
-      return 'S';
+      status = 'S';
   } else if (cmd == "dump") {
     if (dumpMappingFile(stdoutPath))
-      return 'S';
+      status = 'S';
   } else if (cmd == "acl") {
     if (loadACLFile(stdinPath))
-      return 'S';
+      status = 'S';
   } else if (cmd == "meta") {
     PhoneMapping::get().printMetadata();
-    return 'S';
+    status = 'S';
   } else {
-    LOG(WARNING) << "Unrecognized command: " << cmd << "(fds: " << argfd_.size() << ")";
+    LOG(WARNING) << "Unrecognized command: " << cmd << "(fds: " << argfd.size() << ")";
   }
-  return 'F';
-}
+
+  if (sendto(sock_, &status, 1, 0, &peer.addr, peer.addr_len) < 0)
+    PLOG(WARNING) << "sendto";
+
+  for (int fd : argfd)
+    close(fd);
+ } catch (std::exception& e) {
+  LOG(ERROR) << "Bad argument: " << e.what();
+ }
 
 void ControlThread::operator()() {
   while (true) try {
@@ -353,13 +362,11 @@ void ControlThread::operator()() {
     }
 
     StringPiece body{pktbuf_.data(), (size_t)bytes};
-    char status = dispatch(folly::parseJson(body));
+    folly::dynamic msg = folly::parseJson(body);
+    std::thread([this, peer = peer_, msg = std::move(msg), argfd = argfd_]() {
+      dispatch(peer, msg, argfd);
+    }).detach();
 
-    if (sendto(sock_, &status, 1, 0, &peer_, peer_len_) < 0)
-      PLOG(WARNING) << "sendto";
-
-    for (int fd : argfd_)
-      close(fd);
   } catch (std::exception& e) {
     LOG(ERROR) << "Bad message: " << e.what();
   }
