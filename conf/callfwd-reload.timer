@@ -1,0 +1,7 @@
+[Unit]
+Description=CallFwd DB autoupdate
+PartOf=callfwd.service
+
+[Timer]
+OnCalendar=daily
+Persistent=true

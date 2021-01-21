@@ -17,6 +17,16 @@ ln -Tsf _build.arch _build
 cd $HOME/prj/callfwd
 ln -Tsf deps.arch deps
 
+HOST=147.135.46.46
 rsync --info=progress2 \
-    build.centos/callfwd/callfwd 147.135.46.46:~
-rsync callfwdctl 147.135.46.46:~
+    build.centos/callfwd/callfwd $HOST:~
+rsync callfwdctl $HOST:~
+rsync --rsync-path="sudo rsync" \
+    conf/callfwd.{service,socket} \
+    conf/callfwd-acl.{service,timer} \
+    conf/callfwd-reload.{service,timer} \
+    $HOST:/etc/systemd/system/
+rsync --rsync-path="sudo rsync" \
+    conf/callfwd.{env,flags} $HOST:/etc/
+ssh $HOST sudo systemctl daemon-reload
+notify-send "$HOST updated"

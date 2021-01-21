@@ -1,8 +1,0 @@
-[Unit]
-Description=Update callfwd ACLs
-Requires=callfwd.service
-
-[Service]
-Type=oneshot
-ExecStart=/home/sergei/update_acl.sh
-User=sergei

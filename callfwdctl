@@ -10,6 +10,7 @@ import subprocess
 import tarfile
 import json
 import argparse
+import glob
 
 
 CALLFWD_SERVER_PATH = "/run/callfwd"
@@ -58,10 +59,22 @@ class CallFwdControl(object):
                 self._make_request(msg, [f.fileno()])
         self._wait_response()
 
-    def reload_db(self, path, country):
+    def reload_db(self, path, country, update):
+        link_to = None
+        if update is not None:
+            candidates = sorted(glob.glob(update))
+            if len(candidates) > 0:
+                link_to = path
+                path = candidates[-1]
+
         msg = { "cmd": "reload" }
         msg["country"] = country
         self._read_db_op(msg, path)
+
+        if link_to is not None:
+            if os.path.exists(link_to):
+                os.unlink(link_to)
+            os.symlink(path, link_to)
 
     def verify_db(self, path, country):
         msg = { "cmd": "verify" }
@@ -100,9 +113,11 @@ if __name__ == '__main__':
     reload_group = subparsers.add_parser('reload')
     reload_group.add_argument('-c', '--country', type=str, default='US',
                               help="Country code (US, CA)")
+    reload_group.add_argument('-u', '--update', type=str, default=None,
+                              help="A directory where to search for updates")
     reload_group.add_argument('db', type=str, help="Path to database")
     reload_group.set_defaults(func=CallFwdControl.reload_db)
-    reload_group.set_defaults(args=['db', 'country'])
+    reload_group.set_defaults(args=['db', 'country', 'update'])
 
     verify_group = subparsers.add_parser('verify')
     verify_group.add_argument('-c', '--country', type=str, default='US',

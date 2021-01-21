@@ -1,0 +1,14 @@
+[Unit]
+Description=Update callfwd ACLs
+Requisite=postgresql-11.service
+After=callfwd.socket
+
+[Service]
+Type=oneshot
+User=sergei
+EnvironmentFile=/etc/callfwd.env
+Environment=ACL_OUT=/tmp/calfwd.acl
+ExecStart=/usr/bin/psql -c \
+    '\copy (${CALLFWD_ACL_QUERY}) to ${ACL_OUT} with csv;' \
+    -U ${CALLFWD_PG_USER} ${CALLFWD_PG_DATABASE}
+ExecStart=/usr/bin/python3 ${CALLFWDCTL} acl ${ACL_OUT}

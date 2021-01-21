@@ -1,0 +1,7 @@
+[Unit]
+Description=CallFwd ACLs autoupdate
+PartOf=callfwd.service
+
+[Timer]
+OnCalendar=minutely
+Persistent=true

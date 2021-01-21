@@ -6,6 +6,16 @@ The main feature is high-speed mapping 10-digit phone number into 10-digit routi
 
 In addition, it support inverse operation of listing all numbers that maps into specified routing number prefix.
 
+# Installation
+
+- Compile proxygen using `proxygen/proxygen/build.sh` script
+- Install `proxygen/proxygen/_build/deps/{bin,lib,include}` into `callfwd/deps/{bin,lib,include}`
+- Install `proxygen/proxygen/_build/{bin,lib,include}` into `callfwd/deps/{bin,lib,include}`
+- Build `callfwd` binary using `cmake`
+- Install `callfwd` binary and `conf/` to the target machine (check `build-centos.sh` as example)
+- Read and modify `/etc/callfwd.{flags,env}` as needed
+- Start service and autoupdate timers using `sudo systemctl start callfwd.service`
+
 # Operation
 
 The main binary is expected to run through `systemd` service unit.

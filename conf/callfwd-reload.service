@@ -1,0 +1,13 @@
+[Unit]
+Description=Update callfwd DB
+After=callfwd.socket
+PartOf=callfwd.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/callfwd.env
+User=sergei
+ExecStart=/usr/bin/python3 ${CALLFWDCTL} reload \
+    -c US -u ${CALLFWD_US_UPDATE_PATTERN} ${CALLFWD_CURRENT_US_DB}
+ExecStart=/usr/bin/python3 ${CALLFWDCTL} reload \
+    -c CA -u ${CALLFWD_CA_UPDATE_PATTERN} ${CALLFWD_CURRENT_CA_DB}

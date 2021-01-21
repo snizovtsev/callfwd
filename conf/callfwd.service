@@ -1,12 +1,15 @@
 [Unit]
-Description=Call forwarding daemon
+Description=CallFwd daemon
+Requires=callfwd.socket
+Requires=callfwd-acl.timer
+Requires=callfwd-reload.timer
+Wants=callfwd-acl.service
+Wants=callfwd-reload.service
 
 [Service]
 Restart=on-failure
 User=sergei
 Group=sergei
-StandardError=journal
 Environment=LD_LIBRARY_PATH=/home/sergei
 ExecStart=/home/sergei/callfwd \
-  -flagfile=/etc/callfwd.flags \
-  /tmp/20201218-lrn-bigdata.txt
+  -flagfile=/etc/callfwd.flags
