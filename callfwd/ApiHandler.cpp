@@ -77,9 +77,12 @@ class TargetHandler final : public RequestHandler {
     size_t N = pn_.size();
     std::string record;
 
-    rn_.resize(N);
-    PhoneMapping::get()
-      .getRNs(N, pn_.data(), rn_.data());
+    us_rn_.resize(N);
+    ca_rn_.resize(N);
+    PhoneMapping::getUS()
+      .getRNs(N, pn_.data(), us_rn_.data());
+    PhoneMapping::getCA()
+      .getRNs(N, pn_.data(), ca_rn_.data());
 
     ResponseBuilder(downstream_)
       .status(200, "OK")
@@ -90,14 +93,18 @@ class TargetHandler final : public RequestHandler {
     if (json_)
       record += "[\n";
     for (size_t i = 0; i < N; ++i) {
+      uint64_t rn = us_rn_[i];
+      if (rn == PhoneNumber::NONE)
+        rn = ca_rn_[i];
+
       if (json_) {
-        if (rn_[i] != PhoneNumber::NONE)
-          folly::format(&record, "  {{\"pn\": \"{}\", \"rn\": \"{}\"}},\n", pn_[i], rn_[i]);
+        if (rn != PhoneNumber::NONE)
+          folly::format(&record, "  {{\"pn\": \"{}\", \"rn\": \"{}\"}},\n", pn_[i], rn);
         else
           folly::format(&record, "  {{\"pn\": \"{}\", \"rn\": null}},\n", pn_[i]);
       } else {
-        if (rn_[i] != PhoneNumber::NONE)
-          folly::format(&record, "{},{}\n", pn_[i], rn_[i]);
+        if (rn != PhoneNumber::NONE)
+          folly::format(&record, "{},{}\n", pn_[i], rn);
         else
           folly::format(&record, "{},\n", pn_[i]);
       }
@@ -172,7 +179,8 @@ class TargetHandler final : public RequestHandler {
   bool json_ = false;
   std::unique_ptr<folly::IOBuf> body_;
   folly::small_vector<uint64_t, 16> pn_;
-  folly::small_vector<uint64_t, 16> rn_;
+  folly::small_vector<uint64_t, 16> us_rn_;
+  folly::small_vector<uint64_t, 16> ca_rn_;
 };
 
 class ReverseHandler final : public RequestHandler {
@@ -201,33 +209,39 @@ class ReverseHandler final : public RequestHandler {
               json ? "application/json" : "text/plain")
       .send();
 
-    PhoneMapping db = PhoneMapping::get();
-    std::string record;
+    PhoneMapping us = PhoneMapping::getUS();
+    PhoneMapping ca = PhoneMapping::getCA();
 
     if (json)
-      record += "[\n";
+      record_ += "[\n";
     for (std::pair<uint64_t, uint64_t> range : query_) {
-      db.inverseRNs(range.first, range.second);
-      for (; db.hasRow(); db.advance()) {
-        if (json) {
-          folly::format(&record, "  {{\"pn\": \"{}\", \"rn\": \"{}\"}},\n",
-                        db.currentPN(), db.currentRN());
-        } else {
-          folly::format(&record, "{},{}\n", db.currentPN(), db.currentRN());
-        }
-
-        if (record.size() > 1000) {
-          downstream_->sendBody(folly::IOBuf::copyBuffer(record));
-          record.clear();
-        }
-      }
+      us.inverseRNs(range.first, range.second);
+      sendBody(us, json);
+      ca.inverseRNs(range.first, range.second);
+      sendBody(ca, json);
     }
     if (json)
-      record += "]\n";
+      record_ += "]\n";
 
-    if (!record.empty())
-      downstream_->sendBody(folly::IOBuf::copyBuffer(record));
+    if (!record_.empty())
+      downstream_->sendBody(folly::IOBuf::copyBuffer(record_));
     downstream_->sendEOM();
+  }
+
+  void sendBody(PhoneMapping &db, bool json) {
+    for (; db.hasRow(); db.advance()) {
+      if (json) {
+        folly::format(&record_, "  {{\"pn\": \"{}\", \"rn\": \"{}\"}},\n",
+                      db.currentPN(), db.currentRN());
+      } else {
+        folly::format(&record_, "{},{}\n", db.currentPN(), db.currentRN());
+      }
+
+      if (record_.size() > 1000) {
+        downstream_->sendBody(folly::IOBuf::copyBuffer(record_));
+        record_.clear();
+      }
+    }
   }
 
   void onQueryParam(StringPiece name, StringPiece value) {
@@ -271,6 +285,7 @@ class ReverseHandler final : public RequestHandler {
 
  private:
   std::vector<std::pair<uint64_t, uint64_t>> query_;
+  std::string record_;
 };
 
 class ApiHandlerFactory : public RequestHandlerFactory {

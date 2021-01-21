@@ -58,8 +58,10 @@ class PhoneMapping {
   PhoneMapping(std::atomic<Data*> &global);
   /** Ensure move constructor exists */
   PhoneMapping(PhoneMapping&& rhs) noexcept;
-  /** Get default instance from global variable. */
-  static PhoneMapping get() noexcept;
+  /** Get default US instance from global variable. */
+  static PhoneMapping getUS() noexcept;
+  /** Get default CA instance from global variable. */
+  static PhoneMapping getCA() noexcept;
   /** Check if DB fully loaded into memory. */
   static bool isAvailable() noexcept;
   ~PhoneMapping() noexcept;

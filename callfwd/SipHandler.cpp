@@ -130,7 +130,9 @@ class SIPHandler : public AsyncUDPSocket::ReadCallback {
     uint64_t pn = PhoneNumber::fromString(user);
     uint64_t rn = PhoneNumber::NONE;
     if (pn != PhoneNumber::NONE)
-      rn = PhoneMapping::get().getRN(pn);
+      rn = PhoneMapping::getUS().getRN(pn);
+    if (rn == PhoneNumber::NONE)
+      rn = PhoneMapping::getCA().getRN(pn);
 
     reply(302, "Moved Temporarily");
     if (rn != PhoneNumber::NONE) {

@@ -22,12 +22,19 @@
 
 using folly::StringPiece;
 
-static std::atomic<PhoneMapping::Data*> currentMapping;
-static std::atomic<ACL::Data*> currentACL;
 static constexpr auto reportInterval = std::chrono::seconds(30);
 
-PhoneMapping PhoneMapping::get() noexcept { return { currentMapping }; }
-bool PhoneMapping::isAvailable() noexcept { return !!currentMapping.load(); }
+static std::atomic<PhoneMapping::Data*> mappingUS;
+static std::atomic<PhoneMapping::Data*> mappingCA;
+static std::atomic<ACL::Data*> currentACL;
+
+PhoneMapping PhoneMapping::getUS() noexcept { return { mappingUS }; }
+PhoneMapping PhoneMapping::getCA() noexcept { return { mappingCA }; }
+
+bool PhoneMapping::isAvailable() noexcept {
+  return !!mappingUS.load() && !!mappingCA.load();
+}
+
 ACL ACL::get() noexcept { return { currentACL }; }
 
 static StringPiece osBasename(StringPiece path) {
@@ -63,6 +70,7 @@ static bool loadMappingFile(const std::string &path, folly::dynamic meta)
 {
   int64_t estimate = meta.getDefault("row_estimate", 0).asInt();
   const std::string &name = meta.getDefault("file_name", path).asString();
+  const std::string &country = meta.getDefault("country", "US").asString();
 
   std::ifstream in;
   std::vector<char> rbuf(1ull << 19);
@@ -96,12 +104,15 @@ static bool loadMappingFile(const std::string &path, folly::dynamic meta)
   }
 
   LOG(INFO) << "Building index (" << nrows << " rows)...";
-  builder.commit(currentMapping);
+  if (country == "CA")
+    builder.commit(mappingCA);
+  else
+    builder.commit(mappingUS);
   folly::hazptr_cleanup();
   return true;
 }
 
-static bool verifyMappingFile(const std::string &path)
+static bool verifyMappingFile(const std::string &path, folly::dynamic meta)
 {
   std::ifstream in;
   std::string linebuf;
@@ -109,7 +120,9 @@ static bool verifyMappingFile(const std::string &path)
   folly::stop_watch<> watch;
   size_t maxdiff = 100;
   size_t nrows = 0;
-  PhoneMapping db = PhoneMapping::get();
+
+  bool canada = meta.getDefault("country", "US").asString() == "CA";
+  PhoneMapping db = canada ? PhoneMapping::getCA() : PhoneMapping::getUS();
 
   try {
     LOG(INFO) << "Verifying database";
@@ -153,13 +166,14 @@ static bool verifyMappingFile(const std::string &path)
   return true;
 }
 
-static bool dumpMappingFile(const std::string &path)
+static bool dumpMappingFile(const std::string &path, folly::dynamic meta)
 {
   std::ofstream out;
-
-  PhoneMapping db = PhoneMapping::get();
   folly::stop_watch<> watch;
   size_t nrows = 0;
+
+  bool canada = meta.getDefault("country", "US").asString() == "CA";
+  PhoneMapping db = canada ? PhoneMapping::getCA() : PhoneMapping::getUS();
 
   try {
     LOG(INFO) << "Dumping database";
@@ -329,16 +343,17 @@ try {
     if (loadMappingFile(stdinPath, msg))
       status = 'S';
   } else if (cmd == "verify") {
-    if (verifyMappingFile(stdinPath))
+    if (verifyMappingFile(stdinPath, msg))
       status = 'S';
   } else if (cmd == "dump") {
-    if (dumpMappingFile(stdoutPath))
+    if (dumpMappingFile(stdoutPath, msg))
       status = 'S';
   } else if (cmd == "acl") {
     if (loadACLFile(stdinPath))
       status = 'S';
   } else if (cmd == "meta") {
-    PhoneMapping::get().printMetadata();
+    PhoneMapping::getUS().printMetadata();
+    PhoneMapping::getCA().printMetadata();
     status = 'S';
   } else {
     LOG(WARNING) << "Unrecognized command: " << cmd << "(fds: " << argfd.size() << ")";

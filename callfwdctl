@@ -9,6 +9,7 @@ import datetime
 import subprocess
 import tarfile
 import json
+import argparse
 
 
 CALLFWD_SERVER_PATH = "/run/callfwd"
@@ -38,41 +39,42 @@ class CallFwdControl(object):
         if msg != b'S':
             exit(1)
 
-    def reload_db(self, new_db):
-        msg = { "cmd": "reload" }
-        msg["country"] = "US"
+    def _read_db_op(self, msg, path):
         msg["loaded"] = str(datetime.datetime.now())
-        msg["file_name"] = new_db
+        msg["file_name"] = path
         msg["stdin"] = 0
-        if new_db.endswith(".tar.gz"):
-            with tarfile.open(new_db) as tar:
+        if path.endswith(".tar.gz"):
+            with tarfile.open(path) as tar:
                 ti = tar.next()
                 msg["inner_name"] = ti.name
                 msg["row_estimate"] = ti.size // 23
 
-            shell = ["tar", "xOf", new_db, msg["inner_name"]]
+            shell = ["tar", "xOf", path, msg["inner_name"]]
             with subprocess.Popen(shell, stdout=subprocess.PIPE) as p:
                 self._make_request(msg, [p.stdout.fileno()])
         else:
-            msg["row_estimate"] = os.stat(new_db).st_size // 23
-            with open(new_db, "r") as f:
+            msg["row_estimate"] = os.stat(path).st_size // 23
+            with open(path, "r") as f:
                 self._make_request(msg, [f.fileno()])
         self._wait_response()
 
-    def verify_db(self, backup_db):
-        msg = { "cmd": "verify" }
-        msg["file_name"] = backup_db
-        msg["stdin"] = 0
-        with open(backup_db, "r") as f:
-            self._make_request(msg, [f.fileno()])
-        self._wait_response()
+    def reload_db(self, path, country):
+        msg = { "cmd": "reload" }
+        msg["country"] = country
+        self._read_db_op(msg, path)
 
-    def dump_db(self, restored_db):
+    def verify_db(self, path, country):
+        msg = { "cmd": "verify" }
+        msg["country"] = country
+        self._read_db_op(msg, path)
+
+    def dump_db(self, path, country):
         msg = { "cmd": "dump" }
-        msg["file_name"] = restored_db
+        msg["file_name"] = path
+        msg["country"] = country
         msg["stdout"] = 0
-        with open(restored_db, "w+") as f:
-            self._make_request(msg [f.fileno()])
+        with open(path, "w+") as f:
+            self._make_request(msg, [f.fileno()])
         self._wait_response()
 
     def reload_acl(self, acl):
@@ -90,16 +92,44 @@ class CallFwdControl(object):
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-S', '--socket', type=str, default=CALLFWD_SERVER_PATH,
+                        help="Path to server control socket")
+    subparsers = parser.add_subparsers()
+
+    reload_group = subparsers.add_parser('reload')
+    reload_group.add_argument('-c', '--country', type=str, default='US',
+                              help="Country code (US, CA)")
+    reload_group.add_argument('db', type=str, help="Path to database")
+    reload_group.set_defaults(func=CallFwdControl.reload_db)
+    reload_group.set_defaults(args=['db', 'country'])
+
+    verify_group = subparsers.add_parser('verify')
+    verify_group.add_argument('-c', '--country', type=str, default='US',
+                              help="Country code (US, CA)")
+    verify_group.add_argument('db', type=str, help="Path to database")
+    verify_group.set_defaults(func=CallFwdControl.verify_db)
+    verify_group.set_defaults(args=['db', 'country'])
+
+    dump_group = subparsers.add_parser('dump')
+    dump_group.add_argument('-c', '--country', type=str, default='US',
+                            help="Country code (US, CA)")
+    dump_group.add_argument('db', type=str, help="Path to database")
+    dump_group.set_defaults(func=CallFwdControl.dump_db)
+    dump_group.set_defaults(args=['db', 'country'])
+
+    acl_group = subparsers.add_parser('acl')
+    acl_group.add_argument('csv', type=str, help="Path to PGSQL dump")
+    acl_group.set_defaults(func=CallFwdControl.reload_acl)
+    acl_group.set_defaults(args=['csv'])
+
+    status_group = subparsers.add_parser('status')
+    status_group.set_defaults(func=CallFwdControl.status)
+    status_group.set_defaults(args=[])
+
+    options = parser.parse_args()
+
     with tempfile.TemporaryDirectory('callfwdctl') as tmpdir:
         doorbell = os.path.join(tmpdir, 'doorbell')
-        ctl = CallFwdControl(doorbell)
-        if sys.argv[1] == 'reload':
-            ctl.reload_db(sys.argv[2])
-        elif sys.argv[1] == 'verify':
-            ctl.verify_db(sys.argv[2])
-        elif sys.argv[1] == 'dump':
-            ctl.dump_db(sys.argv[2])
-        elif sys.argv[1] == 'acl':
-            ctl.reload_acl(sys.argv[2])
-        elif sys.argv[1] == 'status':
-            ctl.status()
+        ctl = CallFwdControl(doorbell, options.socket)
+        options.func(ctl, *map(options.__getattribute__, options.args))
