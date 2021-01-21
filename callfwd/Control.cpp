@@ -22,7 +22,9 @@
 
 using folly::StringPiece;
 
-static constexpr auto reportInterval = std::chrono::seconds(30);
+DEFINE_uint32(status_report_period, 0,
+              "How often (in seconds) long operation reports about its status");
+static auto reportPeriod = std::chrono::seconds(30);
 
 static std::atomic<PhoneMapping::Data*> mappingUS;
 static std::atomic<PhoneMapping::Data*> mappingCA;
@@ -92,7 +94,7 @@ static bool loadMappingFile(const std::string &path, folly::dynamic meta)
 
     while (in.good()) {
       builder.fromCSV(in, nrows, 10000);
-      if (watch.lap(reportInterval)) {
+      if (watch.lap(reportPeriod)) {
         LOG_IF(INFO, estimate != 0) << nrows * 100 / estimate << "% completed";
         LOG_IF(INFO, estimate == 0) << nrows << " rows read";
       }
@@ -148,7 +150,7 @@ static bool verifyMappingFile(const std::string &path, folly::dynamic meta)
           return false;
         }
       }
-      if (watch.lap(reportInterval))
+      if (watch.lap(reportPeriod))
         LOG_IF(INFO, db.size()) << nrows * 100 / db.size() << "% completed";
     }
     in.close();
@@ -186,7 +188,7 @@ static bool dumpMappingFile(const std::string &path, folly::dynamic meta)
         db.advance();
         ++nrows;
       }
-      if (watch.lap(reportInterval))
+      if (watch.lap(reportPeriod))
         LOG_IF(INFO, db.size()) << nrows * 100 / db.size() << "% completed";
     }
     out.flush();
@@ -401,6 +403,8 @@ void startControlSocket() {
   }
   google::SetStderrLogging(google::FATAL);
 
+  if (FLAGS_status_report_period)
+    reportPeriod = std::chrono::seconds(FLAGS_status_report_period);
   int sockFd = SD_LISTEN_FDS_START + 0;
   std::thread(ControlThread(sockFd)).detach();
 }
