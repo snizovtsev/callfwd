@@ -19,11 +19,4 @@ target_link_libraries(callfwd
   ${SYSTEMD_LDFLAGS}
   )
 
-add_executable(sip-test SipTest.cpp)
-target_link_libraries(sip-test
-  Folly::folly
-  glog::glog
-  osips_parser
-  )
-
 add_subdirectory(test)
