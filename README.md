@@ -16,6 +16,25 @@ In addition, it support inverse operation of listing all numbers that maps into 
 - Read and modify `/etc/callfwd.{flags,env}` as needed
 - Start service and autoupdate timers using `sudo systemctl start callfwd.service`
 
+# Notes on CentOS 7
+- Use devtoolset-9 and tbb 2019, set environment variables as in Dockerfile
+- When building proxygen, compile gflags glog and boost 1.75 from sources and install them into `_build/deps`
+- Folly's check for SIMD support is broken, modify its `CMakeLists.txt` to always use SIMD
+``` diff
+-  if (${IS_X86_64_ARCH} STREQUAL "-1")
++  #if (${IS_X86_64_ARCH} STREQUAL "-1")
++  if (FALSE)
+```
+- Modify `proxygen/build.sh` to use static boost libraries (copy line from fuzzing section)
+``` diff
+@@ -208,9 +208,9 @@ function setup_folly() {
+   MAYBE_USE_STATIC_DEPS=""
+   MAYBE_USE_STATIC_BOOST=""
+   MAYBE_BUILD_SHARED_LIBS=""
++    MAYBE_USE_STATIC_BOOST="-DBOOST_LINK_STATIC=ON"
+```
+- After copying `proxygen` artifacts into `deps` modify `proxygen-config.cmake` and remove `find_depedency(mvfst)` line
+
 # Operation
 
 The main binary is expected to run through `systemd` service unit.
