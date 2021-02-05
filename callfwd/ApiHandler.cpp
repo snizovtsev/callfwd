@@ -52,6 +52,7 @@ class TargetHandler final : public RequestHandler {
     ResponseBuilder(downstream_)
       .status(400, "Bad Request")
       .sendWithEOM();
+    needBody_ = false;
   }
 
   void sanitizeHeader(HTTPHeaderCode code, const std::string& name,
