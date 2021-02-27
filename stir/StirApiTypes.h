@@ -31,9 +31,9 @@ struct VerificationRequest {
 
 struct VerificationResponse {
   int reasonCode;
+  folly::fbstring verStat;
   folly::fbstring reasonText;
   folly::fbstring reasonDesc;
-  folly::fbstring verStat;
 };
 
 enum StirApiErrorCode {

@@ -1,4 +1,5 @@
 #include <folly/init/Init.h>
+#include <folly/ssl/Init.h>
 #include <folly/portability/GFlags.h>
 #include <folly/system/HardwareConcurrency.h>
 #include <proxygen/httpserver/HTTPServer.h>
@@ -20,6 +21,7 @@ std::unique_ptr<RequestHandlerFactory> makeHttpNotFound();
 int main(int argc, char *argv[])
 {
   folly::Init init(&argc, &argv);
+  folly::ssl::init();
   google::InstallFailureSignalHandler();
 
   std::vector<HTTPServer::IPConfig> IPs;

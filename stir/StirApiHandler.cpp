@@ -1,4 +1,6 @@
 #include <stir/StirApiTypes.h>
+#include <stir/Passport.h>
+
 #include <folly/Range.h>
 #include <folly/String.h>
 #include <folly/dynamic.h>
@@ -174,11 +176,11 @@ class StirApiHandler final : public RequestHandler {
   }
 
   SigningResponse doSigning(const SigningRequest &req) {
-    return {};
+    return { makePassport(req) };
   }
 
   VerificationResponse doVerification(const VerificationRequest &req) {
-    return {};
+    return verifyPassport(req);
   }
 
   void sendResponse(int status) {
@@ -213,21 +215,20 @@ class StirApiHandler final : public RequestHandler {
 
 class StirApiFactory : public RequestHandlerFactory {
  public:
+  void onServerStart(folly::EventBase* /*evb*/) noexcept override {
+  }
 
- void onServerStart(folly::EventBase* /*evb*/) noexcept override {
- }
+  void onServerStop() noexcept override {
+  }
 
- void onServerStop() noexcept override {
- }
-
- RequestHandler* onRequest(RequestHandler *upstream, HTTPMessage *msg) noexcept override {
-   const StringPiece path = msg->getPathAsStringPiece();
-   if (path.startsWith("/stir/v1/")) {
-     return new StirApiHandler;
-   } else {
-     return upstream;
-   }
- }
+  RequestHandler* onRequest(RequestHandler *upstream, HTTPMessage *msg) noexcept override {
+    const StringPiece path = msg->getPathAsStringPiece();
+    if (path.startsWith("/stir/v1/")) {
+      return new StirApiHandler;
+    } else {
+      return upstream;
+    }
+  }
 };
 
 std::unique_ptr<RequestHandlerFactory> makeStirApi()
@@ -237,16 +238,15 @@ std::unique_ptr<RequestHandlerFactory> makeStirApi()
 
 class HttpNotFound : public RequestHandlerFactory {
  public:
+  void onServerStart(folly::EventBase* /*evb*/) noexcept override {
+  }
 
- void onServerStart(folly::EventBase* /*evb*/) noexcept override {
- }
+  void onServerStop() noexcept override {
+  }
 
- void onServerStop() noexcept override {
- }
-
- RequestHandler* onRequest(RequestHandler *upstream, HTTPMessage *msg) noexcept override {
-   return new DirectResponseHandler(404, "Not Found", "");
- }
+  RequestHandler* onRequest(RequestHandler *upstream, HTTPMessage *msg) noexcept override {
+    return new DirectResponseHandler(404, "Not Found", "");
+  }
 };
 
 std::unique_ptr<RequestHandlerFactory> makeHttpNotFound()
