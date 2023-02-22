@@ -1,0 +1,40 @@
+# Inspired by following examples:
+# - https://github.com/buildbarn/bb-deployments/blob/master/.bazelrc
+
+# Don't inherit PATH and LD_LIBRARY_PATH
+build --incompatible_strict_action_env=true
+
+# Use the new way of defining toolchains.
+build --incompatible_enable_cc_toolchain_resolution=true # 7.0+
+build --incompatible_use_cc_configure_from_rules_cc=true
+
+# Allow cc_library(implementation_deps = [...])
+build --experimental_cc_implementation_deps
+
+# Print the errors in the terminal, not just log files.
+test --test_output=errors
+
+# Only download the final result, the intermediate files can stay on the
+# server side.
+build --remote_download_toplevel
+
+# ===== BuildBarn remote build ======
+# Kubernetes will have a different host name than 'localhost'.
+build:bb-exec --remote_executor=grpc://localhost:8980
+# The Buildbarn worker can configure instance_name_prefix to create separate
+# execution bins within the cluster. Optional, but useful when trying new
+# worker configurations.
+build:bb-exec --remote_instance_name=remote-execution
+# Make sure to load Buildbarn with more requests than the number of CPUs on
+# your host machine.
+build:bb-exec --jobs=64
+# Make sure that the remote execution platform and the matching toolchains
+# take precedence over the other definitions in the WORKSPACE file.
+build:bb-exec --extra_toolchains=//tools/remote-toolchains:all
+
+# When running Ubuntu 22.04 executors.
+build:bb-ubuntu-22-04 --config=bb-exec
+build:bb-ubuntu-22-04 --extra_execution_platforms=//tools/remote-toolchains:ubuntu-act-22-04-platform
+
+# When running bare executors on your own host machine.
+build:bb-local --config=bb-exec
