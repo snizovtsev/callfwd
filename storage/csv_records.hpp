@@ -4,32 +4,32 @@
 #include <cstdint>
 
 struct LRNRow {
-    uint64_t pn;
-    uint64_t rn;
+  uint64_t pn;
+  uint64_t rn;
 };
 
 struct DNORow {
-    uint64_t pn;
-    uint16_t type;
+  uint64_t pn;
+  uint16_t type;
 };
 
 struct DNCRow {
-    uint64_t pn;
+  uint64_t pn;
 };
 
 struct YouMailRow {
-    uint64_t pn;
-    float spam_score;
-    float fraud_prob;
-    float unlawful_prob;
-    float tcpa_fraud_prob;
+  uint64_t pn;
+  float spam_score;
+  float fraud_prob;
+  float unlawful_prob;
+  float tcpa_fraud_prob;
 };
 
 struct PnRecord {
-    LRNRow     lrn;
-    DNCRow     dnc;
-    YouMailRow youmail;
-    DNORow     dno;
+  LRNRow     lrn;
+  DNCRow     dnc;
+  DNORow     dno;
+  YouMailRow youmail;
 };
 
 #endif // CALLFWD_STORE_CSV_RECORDS_H

@@ -3,57 +3,68 @@
 
 #include "csv_records.hpp"
 
+#include <vector>
 #include <cstddef>
 #include <cstdio>
 
 class ZsvReader {
-public:
-    void Open(const char *csv_path);
-    size_t NumRows() noexcept { return num_rows_; }
-    void Close() noexcept;
-    ~ZsvReader() noexcept;
+ public:
+  void Open(const char *csv_path);
+  size_t NumRows() noexcept { return num_rows_; }
+  void Close() noexcept;
+  ~ZsvReader() noexcept;
 
-protected:
-    bool NextRow();
+ protected:
+  bool NextRow();
 
-protected:
-    struct zsv_scanner *zsv_{nullptr};
-    FILE *pipe_{nullptr};
-    size_t num_rows_{0};
+ protected:
+  struct zsv_scanner *zsv_ = nullptr;
+  FILE *pipe_ = nullptr;
+  size_t num_rows_ = 0;
 };
 
 struct LRNReader : ZsvReader {
-    bool NextRow(LRNRow &row);
+  bool NextRow(LRNRow &row);
 };
 
 struct DNCReader : ZsvReader {
-    bool NextRow(DNCRow &row);
+  bool NextRow(DNCRow &row);
 };
 
 struct DNOReader : ZsvReader {
-    bool NextRow(DNORow &row);
+  bool NextRow(DNORow &row);
 };
 
 struct YouMailReader : ZsvReader {
-    bool NextRow(YouMailRow &row);
+  bool NextRow(YouMailRow &row);
 };
 
-class PnJoinReader {
-public:
-    LRNReader lrn;
-    DNCReader dnc;
-    DNOReader dno;
+struct PnMultiReader {
+  std::vector<LRNReader> lrn;
+  DNCReader              dnc;
+  DNOReader              dno;
+  YouMailReader          youmail;
+};
 
-    PnJoinReader();
-    ~PnJoinReader() noexcept;
+struct PnEdgeBuf {
+  DNCRow     dnc;
+  DNORow     dno;
+  YouMailRow youmail;
+  LRNRow     lrn[];
+};
 
-    bool NextRow(PnRecord &rec);
-    size_t NumRows() noexcept { return num_rows_; }
-    void Close();
+class PnRecordJoiner {
+ public:
+  PnRecordJoiner() = default;
+  ~PnRecordJoiner();
 
-private:
-    size_t num_rows_{0};
-    PnRecord rowbuf_;
+  void Start(PnMultiReader &reader);
+  bool NextRow(PnMultiReader &reader, PnRecord &rec);
+  size_t NumRows() noexcept { return num_rows_; }
+
+ private:
+  PnEdgeBuf *rowbuf_ = nullptr;
+  uint32_t num_rows_ = 0;
 };
 
 #endif // CALLFWD_STORE_CSV_READER_H
