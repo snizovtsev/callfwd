@@ -87,3 +87,12 @@ git_repository(
     shallow_since = "1669803947 +0100",
     build_file = "//third_party/xsimd:recipe.bzl",
 )
+
+git_repository(
+    name = "com_grail_bazel_compdb",
+    remote = "https://github.com/grailbio/bazel-compilation-database",
+    commit = "765d43e7e0f8f28e07a48609c79407e7c133a6f8", # v0.5.2
+)
+
+load("@com_grail_bazel_compdb//:deps.bzl", "bazel_compdb_deps")
+bazel_compdb_deps()
