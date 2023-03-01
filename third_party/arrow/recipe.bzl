@@ -101,10 +101,12 @@ cc_library(
         "ARROW_HAVE_AVX2",
         "ARROW_HAVE_BMI2",
         "ARROW_HAVE_SSE4_2",
+        "ARROW_USE_GLOG",
     ],
     hdrs = glob_hdrs + ["cpp/src/arrow/util/config.h"],
     srcs = glob_srcs,
     deps = [
         "@com_github_xtensor-stack_xsimd//:xsimd",
+        "@com_github_google_glog//:glog",
     ]
 )
