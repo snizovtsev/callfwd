@@ -358,6 +358,55 @@ void PermuteHash(const po::variables_map& options,
   CHECK(table_writer->Close().ok());
 }
 
+void Query(const po::variables_map& options,
+           const std::vector<std::string> &args)
+{
+  CHECK_GE(args.size(), 3u);
+
+  auto istream = arrow::io::ReadableFile::Open(args[0])
+    .ValueOrDie();
+
+  auto table_reader = arrow::ipc::RecordBatchFileReader
+    ::Open(istream, arrow::ipc::IpcReadOptions{})
+    .ValueOrDie();
+
+  LOG(INFO) << "reading pthash...";
+  pthash_type pthash;
+  essentials::load(pthash, args[1].c_str());
+  LOG(INFO) << "pthash #keys: " << pthash.num_keys();
+
+  for (unsigned i = 2; i < args.size(); ++i) {
+    uint64_t query = atoll(args[i].c_str());
+    uint64_t row_index = pthash(query);
+    uint64_t chunk = row_index / LRN_ROWS_PER_CHUNK;
+    uint64_t pos = row_index % LRN_ROWS_PER_CHUNK;
+
+    std::cout << "pn: " << query << ' ';
+
+    auto batch = table_reader->ReadRecordBatch(chunk)
+      .ValueOrDie();
+
+    auto pn_column = std::static_pointer_cast<arrow::UInt64Array>(batch->column(0));
+    auto rn_column = std::static_pointer_cast<arrow::UInt64Array>(batch->column(1));
+    uint64_t pn_bits = pn_column->Value(pos);
+    uint64_t rn_bits = rn_column->Value(pos);
+    uint64_t pn = pn_bits >> LRN_BITFIELD_PN_SHIFT;
+
+    if (pn != query) {
+      std::cout << "not found" << std::endl;
+      continue;
+    }
+
+    if (pn_bits & LRN_BITFIELD_LRN_FLAG)
+      std::cout << "rn: " << (rn_bits >> LRN_BITFIELD_PN_SHIFT) << ' ';
+    if (pn_bits & LRN_BITFIELD_DNC_FLAG)
+      std::cout << "dnc ";
+    if (pn_bits & LRN_BITFIELD_DNO_MASK)
+      std::cout << "dno: " << ((pn_bits & LRN_BITFIELD_DNO_MASK) >> LRN_BITFIELD_DNO_SHIFT) << ' ';
+    std::cout << std::endl;
+  }
+}
+
 // template<class Entrypoint>
 // folly::NestedCommandLineApp::Command ArrowCommand(const Entrypoint &entrypoint)
 // {
@@ -427,7 +476,12 @@ int main(int argc, const char* argv[]) {
        po::value<std::string>()->required(),
        "Arrow table output path. Required.");
 
-  // query-pn pn.arrow 2012....
+  /*auto& query_cmd = */app.addCommand(
+      "query", "lrn_table_path pthash key",
+      "Query PN data for number",
+      "",
+      Query);
+
   // invert-rn rn_pn.arrow > rn0.arrow
   // map-rn rn0.arrow >
   // pthash --pn rn.arrow
