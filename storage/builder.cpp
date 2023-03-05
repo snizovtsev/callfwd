@@ -260,65 +260,102 @@ void BuildPTHash(const po::variables_map& options,
 void PermuteHash(const po::variables_map& options,
                  const std::vector<std::string> &args)
 {
+#define OPT_PERMUTE_PN_OUTPUT "output"
+  std::string output_path = options[OPT_PERMUTE_PN_OUTPUT].as<std::string>();
   CHECK_EQ(args.size(), 2u);
 
   LOG(INFO) << "reading pthash...";
   pthash_type f;
   essentials::load(f, args[1].c_str());
+  LOG(INFO) << "pthash #keys: " << f.num_keys();
 
-  auto iostream = arrow::io::MemoryMappedFile
-    ::Open(args[0], arrow::io::FileMode::READ)
+  auto istream = arrow::io::ReadableFile::Open(args[0])
+    .ValueOrDie();
+  auto table_reader = arrow::ipc::RecordBatchFileReader
+    ::Open(istream, arrow::ipc::IpcReadOptions{})
     .ValueOrDie();
 
-  std::shared_ptr<arrow::Table> lrn_table;
-  {
-    auto table_reader = arrow::ipc::feather::Reader
-      ::Open(iostream, arrow::ipc::IpcReadOptions{})
-      .ValueOrDie();
-
-    LOG(INFO) << "reading table...";
-    CHECK(table_reader->Read(&lrn_table).ok());
-  }
-
-  LOG(INFO) << "prepare...";
-  uint32_t num_swaps = 0;
-  int64_t num_rows = lrn_table->num_rows();
-  auto pn_column = lrn_table->column(0);
-  auto rn_column = lrn_table->column(1);
-  std::vector<uint64_t*> pn_chunks(pn_column->num_chunks());
-  std::vector<uint64_t*> rn_chunks(rn_column->num_chunks());
-  CHECK(pn_chunks.size() == rn_chunks.size());
-
-  for (uint32_t ci = 0; ci < pn_chunks.size(); ++ci) {
-    auto pn_chunk = std::static_pointer_cast<arrow::UInt64Array>(pn_column->chunk(ci));
-    pn_chunks[ci] = const_cast<uint64_t*>(pn_chunk->raw_values());
-    auto rn_chunk = std::static_pointer_cast<arrow::UInt64Array>(rn_column->chunk(ci));
-    rn_chunks[ci] = const_cast<uint64_t*>(rn_chunk->raw_values());
-    CHECK(pn_chunk->length() == rn_chunk->length());
-    if (ci + 1 != pn_chunks.size())
-      CHECK(pn_chunk->length() == LRN_ROWS_PER_CHUNK);
-  }
+  // TODO: new table may have more chunks if pthash isn't minimal
+  auto schema = table_reader->schema();
+  int num_batches = table_reader->num_record_batches();
+  std::vector<arrow::UInt64Builder> pn_chunks(num_batches);
+  std::vector<arrow::UInt64Builder> rn_chunks(num_batches);
 
   LOG(INFO) << "permute...";
-  for (int64_t row = 0; row < num_rows;) {
-    int64_t ci = row / LRN_ROWS_PER_CHUNK;
-    int64_t ri = row % LRN_ROWS_PER_CHUNK;
-    uint64_t pn = pn_chunks[ci][ri] >> LRN_BITFIELD_PN_SHIFT;
-    int64_t hrow = f(pn);
-    if (hrow != row) {
-      int64_t hci = hrow / LRN_ROWS_PER_CHUNK;
-      int64_t hri = hrow % LRN_ROWS_PER_CHUNK;
-      std::swap(pn_chunks[ci][ri], pn_chunks[hci][hri]);
-      std::swap(rn_chunks[ci][ri], rn_chunks[hci][hri]);
-      ++num_swaps;
-      if ((num_swaps & 0xfffff) == 0xfffff)
-        LOG(INFO) << "#swaps: " << num_swaps << "/" << num_rows;
-    } else {
-      ++row;
+
+  std::vector<uint64_t> zeroes(LRN_ROWS_PER_CHUNK);
+  uint64_t tot_rows = 0;
+
+  for (int bi = 0; bi < num_batches; ++bi) {
+    auto batch = table_reader->ReadRecordBatch(bi)
+      .ValueOrDie();
+
+    uint64_t num_rows = batch->num_rows();
+    if (bi + 1 != num_batches)
+      CHECK(num_rows == LRN_ROWS_PER_CHUNK);
+    else
+      CHECK(num_rows <= LRN_ROWS_PER_CHUNK);
+
+    const uint64_t *pn_data = batch->column_data(0)->GetValues<uint64_t>(1);
+    const uint64_t *rn_data = batch->column_data(1)->GetValues<uint64_t>(1);
+
+    for (uint64_t row_index = 0; row_index < num_rows; ++row_index) {
+      const uint64_t pn = pn_data[row_index] >> LRN_BITFIELD_PN_SHIFT;
+      const uint64_t target_id = f(pn);
+      const uint64_t target_chunk = target_id / LRN_ROWS_PER_CHUNK;
+      const uint64_t target_row = target_id % LRN_ROWS_PER_CHUNK;
+      arrow::UInt64Builder &target_pn = pn_chunks[target_chunk];
+      arrow::UInt64Builder &target_rn = rn_chunks[target_chunk];
+
+      if (/*unlikely*/target_pn.length() == 0) {
+        size_t chunk_size = LRN_ROWS_PER_CHUNK;
+        if (/*unlikely*/target_chunk + 1 == pn_chunks.size()) {
+          chunk_size = f.num_keys() % LRN_ROWS_PER_CHUNK;
+          if (!chunk_size)
+            chunk_size = LRN_ROWS_PER_CHUNK;
+        }
+
+        zeroes.resize(chunk_size);
+        CHECK(target_pn.AppendValues(zeroes).ok());
+        CHECK(target_rn.AppendValues(zeroes).ok());
+        tot_rows += chunk_size;
+      }
+
+      target_pn[target_row] = pn_data[row_index];
+      target_rn[target_row] = rn_data[row_index];
     }
   }
+  CHECK_EQ(tot_rows, f.num_keys());
 
-  LOG(INFO) << "#swaps: " << num_swaps << "/" << num_rows;
+  LOG(INFO) << "writing result...";
+
+  arrow::ArrayVector pn_column(num_batches);
+  arrow::ArrayVector rn_column(num_batches);
+  for (int bi = 0; bi < num_batches; ++bi) {
+    pn_column[bi] = pn_chunks[bi].Finish()
+      .ValueOrDie();
+    rn_column[bi] = rn_chunks[bi].Finish()
+      .ValueOrDie();
+  }
+  arrow::ChunkedArrayVector columns = {
+    arrow::ChunkedArray::Make(std::move(pn_column))
+          .ValueOrDie(),
+    arrow::ChunkedArray::Make(std::move(rn_column))
+          .ValueOrDie(),
+  };
+
+  auto ostream_ = arrow::io::FileOutputStream::Open(output_path.c_str())
+    .ValueOrDie();
+  auto table_writer = arrow::ipc::MakeFileWriter(ostream_, schema)
+    .ValueOrDie();
+
+  LOG(INFO) << "arrow::Table::Make...";
+  auto lrn_table = arrow::Table::Make(schema, columns, f.num_keys());
+  CHECK(lrn_table);
+
+  LOG(INFO) << "arrow::Table::WriteTable...";
+  CHECK(table_writer->WriteTable(*lrn_table).ok());
+  CHECK(table_writer->Close().ok());
 }
 
 // template<class Entrypoint>
@@ -334,6 +371,7 @@ void PermuteHash(const po::variables_map& options,
 // }
 
 int main(int argc, const char* argv[]) {
+  google::InstallFailureSignalHandler();
   folly::NestedCommandLineApp app{argv[0], "0.9", "", "", nullptr};
   app.addGFlags(folly::ProgramOptionsStyle::GNU);
   FLAGS_logtostderr = 1;
@@ -378,17 +416,22 @@ int main(int argc, const char* argv[]) {
        po::value<float>()->default_value(0.94),
        "Value domain density coefficient");
 
-  auto permute_pn_cmd = app.addCommand(
+  auto& permute_pn_cmd = app.addCommand(
       "permute-hash", "arrow_table_path pthash_path",
       "Rearrange rows by pthash value",
       "",
       PermuteHash);
 
+  permute_pn_cmd.add_options()
+      (OPT_PERMUTE_PN_OUTPUT ",O",
+       po::value<std::string>()->required(),
+       "Arrow table output path. Required.");
+
+  // query-pn pn.arrow 2012....
   // invert-rn rn_pn.arrow > rn0.arrow
   // map-rn rn0.arrow >
   // pthash --pn rn.arrow
   // permute rn.arrow rn.pthash
-  // query-pn pn.arrow 2012....
   // final: pn.arrow rn.arrow pn.pthash rn.pthash
 
   return app.run(argc, argv);
