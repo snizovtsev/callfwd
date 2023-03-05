@@ -65,7 +65,7 @@ bool LRNReader::NextRow(LRNRow &row) {
     return false;
   }
 
-  CHECK(zsv_cell_count(zsv_) == 2);
+  CHECK_EQ(zsv_cell_count(zsv_), 2u);
 
   struct zsv_cell cell = zsv_get_cell(zsv_, 0);
   char *end, *val = reinterpret_cast<char*>(cell.str);
@@ -86,7 +86,7 @@ bool DNCReader::NextRow(DNCRow &row) {
     return false;
   }
 
-  CHECK(zsv_cell_count(zsv_) == 2);
+  CHECK_EQ(zsv_cell_count(zsv_), 2u);
   struct zsv_cell cell = zsv_get_cell(zsv_, 0);
   char *end, *val = reinterpret_cast<char*>(cell.str);
   row.pn = strtoul(val, &end, 10);
@@ -108,7 +108,7 @@ bool DNOReader::NextRow(DNORow &row) {
     return false;
   }
 
-  CHECK(zsv_cell_count(zsv_) == 2);
+  CHECK_EQ(zsv_cell_count(zsv_), 2u);
   struct zsv_cell cell = zsv_get_cell(zsv_, 0);
   char *end, *val = reinterpret_cast<char*>(cell.str);
   row.pn = strtoull(val, &end, 10);
@@ -118,13 +118,10 @@ bool DNOReader::NextRow(DNORow &row) {
   val = reinterpret_cast<char*>(cell.str);
   row.type = strtoul(val, &end, 10);
   CHECK(end == val + cell.len);
-  CHECK(row.type >= 1 && row.type <= 8);
+  CHECK_GE(row.type, 1u);
+  CHECK_LE(row.type, 8u);
 
   return true;
-}
-
-PnRecordJoiner::~PnRecordJoiner() {
-  free(rowbuf_);
 }
 
 void PnRecordJoiner::Start(PnMultiReader &reader) {
@@ -141,11 +138,16 @@ void PnRecordJoiner::Start(PnMultiReader &reader) {
   reader.dno.NextRow(rowbuf_->dno);
 }
 
+PnRecordJoiner::~PnRecordJoiner() {
+  free(rowbuf_);
+}
+
 bool PnRecordJoiner::NextRow(PnMultiReader &reader, PnRecord &rec) {
   // every row in buf are ready
   uint64_t next_pn = std::min({
     rowbuf_->dnc.pn,
     rowbuf_->dno.pn,
+    rowbuf_->youmail.pn,
   });
 
   for (size_t i = 0; i < reader.lrn.size(); ++i)
@@ -155,14 +157,14 @@ bool PnRecordJoiner::NextRow(PnMultiReader &reader, PnRecord &rec) {
   if (next_pn == UINT64_MAX)
     return false;
 
-  CHECK(next_pn > 0);
-  CHECK(next_pn < (1ull << 34));
+  CHECK_GT(next_pn, 0u);
+  CHECK_LT(next_pn, 1ull << 34);
 
   for (size_t i = 0; i < reader.lrn.size(); ++i) {
     if (rowbuf_->lrn[i].pn == next_pn) {
       rec.lrn = rowbuf_->lrn[i];
       reader.lrn[i].NextRow(rowbuf_->lrn[i]);
-      CHECK(rowbuf_->lrn[i].pn > next_pn);
+      CHECK_GT(rowbuf_->lrn[i].pn, next_pn);
       break;
     }
   }
@@ -170,13 +172,13 @@ bool PnRecordJoiner::NextRow(PnMultiReader &reader, PnRecord &rec) {
   if (rowbuf_->dnc.pn == next_pn) {
     rec.dnc = rowbuf_->dnc;
     reader.dnc.NextRow(rowbuf_->dnc);
-    CHECK(rowbuf_->dnc.pn > next_pn);
+    CHECK_GT(rowbuf_->dnc.pn, next_pn);
   }
 
   if (rowbuf_->dno.pn == next_pn) {
     rec.dno = rowbuf_->dno;
     reader.dno.NextRow(rowbuf_->dno);
-    CHECK(rowbuf_->dno.pn > next_pn);
+    CHECK_GT(rowbuf_->dno.pn, next_pn);
   }
 
   ++num_rows_;
