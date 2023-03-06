@@ -67,8 +67,8 @@ git_repository(
 git_repository(
     name = "com_github_liquidaty_zsv",
     remote = "https://github.com/liquidaty/zsv",
-    commit = "9172d237bbeae9bbd2d717ed6f45c5169fb20a51", # v0.3.5-alpha
-    shallow_since = "1674061223 -0800",
+    commit = "f77bc9e3e1124e3ca70e282d2a4789f7071408af",
+    shallow_since = "1677774739 -0800",
     build_file = "//third_party/zsv:recipe.bzl",
 )
 

@@ -50,8 +50,6 @@ ZsvReader::~ZsvReader() noexcept {
 }
 
 bool ZsvReader::NextRow() {
-  if (std::feof(pipe_))
-    return false;
   if (unlikely(zsv_next_row(zsv_) != zsv_status_row))
     return false;
   ++num_rows_;
