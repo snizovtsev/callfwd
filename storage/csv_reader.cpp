@@ -122,6 +122,89 @@ bool DNOReader::NextRow(DNORow &row) {
   return true;
 }
 
+/* A concatenated string of constants found in YouMail columns. */
+static const char* kFraudProbabilityAtoms =
+  "0:DEFINITELY_NOT:"
+  "1:ALMOST_CERTAINLY_NOT:"
+  "2:PROBABLY_NOT:"
+  "3:MAYBE_NOT:"
+  "4:UNKNOWN:"
+  "5:MAYBE:"
+  "6:PROBABLY:"
+  "7:ALMOST_CERTAINLY:"
+  "8:DEFINITELY:";
+
+/* Values corresponding to named constants. */
+static const float kFraudProbabilityValues[9] =
+  {-1.0, -0.8, -0.6, -0.4, 0.0, 0.4, 0.6, 0.8, 1.0};
+
+static float ParseYouMailProbability(const char *token, uint32_t len) {
+  std::string safe_token;
+  const char *pos;
+
+  safe_token.reserve(len + 2);
+  safe_token.append(":");
+  safe_token.append(token, len);
+  safe_token.append(":");
+
+  pos = std::strstr(kFraudProbabilityAtoms,
+                    std::move(safe_token).c_str());
+
+  if (pos) {
+    int index = pos[-1] - '0';
+    return kFraudProbabilityValues[index];
+  }
+
+  char *end = nullptr;
+  float ret = strtof(token, &end);
+  CHECK(end == token + len);
+
+  return ret;
+}
+
+bool YouMailReader::NextRow(YouMailRow &row) {
+  if (!ZsvReader::NextRow()) {
+    row.pn = UINT64_MAX;
+    return false;
+  }
+
+  CHECK_EQ(zsv_cell_count(zsv_), 5u);
+
+  struct zsv_cell cell = zsv_get_cell(zsv_, 0);
+  CHECK(cell.len == 10 || cell.len == 11 || cell.len == 12);
+  char *end, *val = reinterpret_cast<char*>(cell.str);
+  if (cell.len == 11) {
+    CHECK_EQ(*val, '1');
+    val += 1;
+    cell.len -= 1;
+  } else if (cell.len == 12) {
+    CHECK_EQ(val[0], '+');
+    CHECK_EQ(val[1], '1');
+    val += 2;
+    cell.len -= 2;
+  }
+  row.pn = strtoull(val, &end, 10);
+  CHECK(end == val + cell.len);
+
+  cell = zsv_get_cell(zsv_, 1);
+  val = reinterpret_cast<char*>(cell.str);
+  row.spam_score = ParseYouMailProbability(val, cell.len);
+
+  cell = zsv_get_cell(zsv_, 2);
+  val = reinterpret_cast<char*>(cell.str);
+  row.fraud_prob = ParseYouMailProbability(val, cell.len);
+
+  cell = zsv_get_cell(zsv_, 3);
+  val = reinterpret_cast<char*>(cell.str);
+  row.unlawful_prob = ParseYouMailProbability(val, cell.len);
+
+  cell = zsv_get_cell(zsv_, 4);
+  val = reinterpret_cast<char*>(cell.str);
+  row.tcpa_fraud_prob = ParseYouMailProbability(val, cell.len);
+
+  return true;
+}
+
 void PnRecordJoiner::Start(PnMultiReader &reader) {
   num_rows_ = 0;
   free(rowbuf_);
@@ -134,6 +217,7 @@ void PnRecordJoiner::Start(PnMultiReader &reader) {
   }
   reader.dnc.NextRow(rowbuf_->dnc);
   reader.dno.NextRow(rowbuf_->dno);
+  reader.youmail.NextRow(rowbuf_->youmail);
 }
 
 PnRecordJoiner::~PnRecordJoiner() {
@@ -177,6 +261,12 @@ bool PnRecordJoiner::NextRow(PnMultiReader &reader, PnRecord &rec) {
     rec.dno = rowbuf_->dno;
     reader.dno.NextRow(rowbuf_->dno);
     CHECK_GT(rowbuf_->dno.pn, next_pn);
+  }
+
+  if (rowbuf_->youmail.pn == next_pn) {
+    rec.youmail = rowbuf_->youmail;
+    reader.youmail.NextRow(rowbuf_->youmail);
+    CHECK_GT(rowbuf_->youmail.pn, next_pn);
   }
 
   ++num_rows_;

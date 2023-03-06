@@ -16,17 +16,23 @@
 using namespace pthash;
 namespace po = ::boost::program_options;
 
+enum {
+  LRN_ROWS_PER_CHUNK     = 2036, /* 32kb message */
+};
+
 struct MapPnOpts {
   explicit MapPnOpts() noexcept = default;
   explicit MapPnOpts(const po::variables_map& options,
                      const std::vector<std::string> &args);
 
   std::vector<std::string> lrn_data_paths;
-# define OPT_MAP_PN_DNC    "dnc"
+# define OPT_MAP_PN_DNC     "dnc"
   std::string dnc_data_path;
-# define OPT_MAP_PN_DNO    "dno"
+# define OPT_MAP_PN_DNO     "dno"
   std::string dno_data_path;
-# define OPT_MAP_PN_OUTPUT "output"
+# define OPT_MAP_PN_YOUMAIL "youmail"
+  std::string youmail_data_path;
+# define OPT_MAP_PN_OUTPUT  "output"
   std::string output_path;
 };
 
@@ -35,6 +41,7 @@ MapPnOpts::MapPnOpts(const po::variables_map& options,
     : lrn_data_paths(args)
     , dnc_data_path(options[OPT_MAP_PN_DNC].as<std::string>())
     , dno_data_path(options[OPT_MAP_PN_DNO].as<std::string>())
+    , youmail_data_path(options[OPT_MAP_PN_YOUMAIL].as<std::string>())
     , output_path(options[OPT_MAP_PN_OUTPUT].as<std::string>())
 {
   if (lrn_data_paths.empty())
@@ -61,20 +68,31 @@ class MapPnCommand {
   RecordBatchWriterPtr table_writer_;
 };
 
-#define LRN_BITFIELD_MASK(field)                \
-  ((1ull << LRN_BITFIELD_##field##_WIDTH) - 1)  \
-  << LRN_BITFIELD_##field##_SHIFT
+/*
+   PN column (UInt64)
+  ┌─────────────┬────────────┬─────────┬─────┬─────┬─────┐
+  │  63 ... 30  │  29 ... 6  │ 5 ... 3 │  2  │  1  │  0  │
+  ├─────────────┼────────────┼─────────┼─────┴─────┴─────┤
+  │   34 bits   │  24 bits   │ 3 bits  │      Flags      │
+  ├─────────────┼────────────┼─────────┼─────┬─────┬─────┤
+  │ 10-digit PN │ YouMail id │   DNO   │     │ DNC │ LRN │
+  └─────────────┴────────────┴─────────┴─────┴─────┴─────┘
+ */
+
+#define LRN_BITS_MASK(field)                \
+  ((1ull << LRN_BITS_##field##_WIDTH) - 1)  \
+  << LRN_BITS_##field##_SHIFT
 
 enum {
-  LRN_ROWS_PER_CHUNK     = 2036, /* 32kb message */
-  LRN_BITFIELD_PN_SHIFT  = 30,
-  LRN_BITFIELD_PN_WIDTH  = 34,
-  LRN_BITFIELD_PN_MASK   = LRN_BITFIELD_MASK(PN),
-  LRN_BITFIELD_LRN_FLAG  = 1ull << 0,
-  LRN_BITFIELD_DNC_FLAG  = 1ull << 1,
-  LRN_BITFIELD_DNO_SHIFT = 2,
-  LRN_BITFIELD_DNO_WIDTH = 3,
-  LRN_BITFIELD_DNO_MASK  = LRN_BITFIELD_MASK(DNO),
+  LRN_BITS_LRN_FLAG  = 1ull << 0,
+  LRN_BITS_DNC_FLAG  = 1ull << 1,
+  LRN_BITS_RES_FLAG  = 1ull << 2,
+  LRN_BITS_DNO_SHIFT = 3,
+  LRN_BITS_DNO_WIDTH = 3,
+  LRN_BITS_DNO_MASK  = LRN_BITS_MASK(DNO),
+  LRN_BITS_PN_SHIFT  = 30,
+  LRN_BITS_PN_WIDTH  = 34,
+  LRN_BITS_PN_MASK   = LRN_BITS_MASK(PN),
 };
 
 MapPnCommand::MapPnCommand()
@@ -101,6 +119,7 @@ arrow::Status MapPnCommand::main(const MapPnOpts &options) {
   }
   csv_.dnc.Open(options.dnc_data_path.c_str());
   csv_.dno.Open(options.dno_data_path.c_str());
+  csv_.youmail.Open(options.youmail_data_path.c_str());
 
   ARROW_ASSIGN_OR_RAISE(ostream_,
                         arrow::io::FileOutputStream::Open(options.output_path));
@@ -113,17 +132,17 @@ arrow::Status MapPnCommand::main(const MapPnOpts &options) {
 
   for (; lrn_joiner_.NextRow(csv_, rec); ) {
     uint64_t pn = rec.lrn.pn | rec.dnc.pn | rec.dno.pn;
-    uint64_t pn_bits = pn << LRN_BITFIELD_PN_SHIFT;
-    uint64_t rn_bits = rec.lrn.rn << LRN_BITFIELD_PN_SHIFT;
+    uint64_t pn_bits = pn << LRN_BITS_PN_SHIFT;
+    uint64_t rn_bits = rec.lrn.rn << LRN_BITS_PN_SHIFT;
 
     if (rec.lrn.pn) /* present in LRN */
-      pn_bits |= LRN_BITFIELD_LRN_FLAG;
+      pn_bits |= LRN_BITS_LRN_FLAG;
 
     if (rec.dnc.pn) /* present in DNC */
-      pn_bits |= LRN_BITFIELD_DNC_FLAG;
+      pn_bits |= LRN_BITS_DNC_FLAG;
 
     if (rec.dno.pn) /* encode DNO type */
-      pn_bits |= rec.dno.type << LRN_BITFIELD_DNO_SHIFT;
+      pn_bits |= rec.dno.type << LRN_BITS_DNO_SHIFT;
 
     ARROW_RETURN_NOT_OK(pnBuilder->Append(pn_bits));
     ARROW_RETURN_NOT_OK(rnBuilder->Append(rn_bits));
@@ -153,7 +172,9 @@ arrow::Status MapPnCommand::main(const MapPnOpts &options) {
   ARROW_RETURN_NOT_OK(table_writer_->WriteRecordBatch(*record));
   tb = ostream_->Tell().ValueOrDie();
   ARROW_RETURN_NOT_OK(table_writer_->Close());
-  std::cerr << "footer: " << ostream_->Tell().ValueOrDie() - tb << std::endl;
+
+  LOG(INFO) << "Arrow footer bytes: "
+            << ostream_->Tell().ValueOrDie() - tb << std::endl;
 
   return arrow::Status::OK();
 }
@@ -218,7 +239,7 @@ void BuildPTHash(const po::variables_map& options,
       auto pn_arr = std::dynamic_pointer_cast<arrow::UInt64Array>(pn_column);
 
       for (std::optional<uint64_t> pn_bits : *pn_arr) {
-        uint64_t pn = *pn_bits >> LRN_BITFIELD_PN_SHIFT;
+        uint64_t pn = *pn_bits >> LRN_BITS_PN_SHIFT;
         pn_keys.push_back(pn);
       }
     }
@@ -242,11 +263,6 @@ void BuildPTHash(const po::variables_map& options,
   pthash::internal_memory_builder_single_phf<murmurhash2_128> builder;
   builder.build_from_keys(pn_keys.begin(), pn_keys.size(), config);
   f.build(builder, config);
-
-  // auto timings = f.build_in_internal_memory(pn_keys.begin(), pn_keys.size(), config);
-  // double total_seconds = timings.partitioning_seconds + timings.mapping_ordering_seconds +
-  //     timings.searching_seconds + timings.encoding_seconds;
-  // LOG(INFO) << "pt computed: " << total_seconds << " seconds";
 
   /* Compute and print the number of bits spent per key. */
   double bits_per_key = static_cast<double>(f.num_bits()) / f.num_keys();
@@ -300,7 +316,7 @@ void PermuteHash(const po::variables_map& options,
     const uint64_t *rn_data = batch->column_data(1)->GetValues<uint64_t>(1);
 
     for (uint64_t row_index = 0; row_index < num_rows; ++row_index) {
-      const uint64_t pn = pn_data[row_index] >> LRN_BITFIELD_PN_SHIFT;
+      const uint64_t pn = pn_data[row_index] >> LRN_BITS_PN_SHIFT;
       const uint64_t target_id = f(pn);
       const uint64_t target_chunk = target_id / LRN_ROWS_PER_CHUNK;
       const uint64_t target_row = target_id % LRN_ROWS_PER_CHUNK;
@@ -390,19 +406,19 @@ void Query(const po::variables_map& options,
     auto rn_column = std::static_pointer_cast<arrow::UInt64Array>(batch->column(1));
     uint64_t pn_bits = pn_column->Value(pos);
     uint64_t rn_bits = rn_column->Value(pos);
-    uint64_t pn = pn_bits >> LRN_BITFIELD_PN_SHIFT;
+    uint64_t pn = pn_bits >> LRN_BITS_PN_SHIFT;
 
     if (pn != query) {
       std::cout << "not found" << std::endl;
       continue;
     }
 
-    if (pn_bits & LRN_BITFIELD_LRN_FLAG)
-      std::cout << "rn: " << (rn_bits >> LRN_BITFIELD_PN_SHIFT) << ' ';
-    if (pn_bits & LRN_BITFIELD_DNC_FLAG)
+    if (pn_bits & LRN_BITS_LRN_FLAG)
+      std::cout << "rn: " << (rn_bits >> LRN_BITS_PN_SHIFT) << ' ';
+    if (pn_bits & LRN_BITS_DNC_FLAG)
       std::cout << "dnc ";
-    if (pn_bits & LRN_BITFIELD_DNO_MASK)
-      std::cout << "dno: " << ((pn_bits & LRN_BITFIELD_DNO_MASK) >> LRN_BITFIELD_DNO_SHIFT) << ' ';
+    if (pn_bits & LRN_BITS_DNO_MASK)
+      std::cout << "dno: " << ((pn_bits & LRN_BITS_DNO_MASK) >> LRN_BITS_DNO_SHIFT) << ' ';
     std::cout << std::endl;
   }
 }
@@ -420,7 +436,9 @@ void Query(const po::variables_map& options,
 // }
 
 int main(int argc, const char* argv[]) {
+  setlocale(LC_ALL, "C");
   google::InstallFailureSignalHandler();
+
   folly::NestedCommandLineApp app{argv[0], "0.9", "", "", nullptr};
   app.addGFlags(folly::ProgramOptionsStyle::GNU);
   FLAGS_logtostderr = 1;
@@ -444,6 +462,10 @@ int main(int argc, const char* argv[]) {
        po::value<std::string>()->default_value("/dev/null"),
        "DNO database path (CSV). Optional.\n"
        "Example row:\n  2012000000,4")
+      (OPT_MAP_PN_YOUMAIL,
+       po::value<std::string>()->default_value("/dev/null"),
+       "YouMail database path (CSV). Optional.\n"
+       "Example row:\n  +12032614649,ALMOST_CERTAINLY,0.95,0.95,0.95")
       (OPT_MAP_PN_OUTPUT ",O",
        po::value<std::string>()->required(),
        "Arrow table output path. Required.");
