@@ -17,7 +17,9 @@ using namespace pthash;
 namespace po = ::boost::program_options;
 
 enum {
-  LRN_ROWS_PER_CHUNK     = 2036, /* 32kb message */
+  DATA_VERSION       = 1, /* TODO */
+  LRN_ROWS_PER_CHUNK = 2036, /* 32kb message */
+  YM_ROWS_PER_CHUNK  = 128,  /*  */
 };
 
 struct MapPnOpts {
@@ -34,6 +36,8 @@ struct MapPnOpts {
   std::string youmail_data_path;
 # define OPT_MAP_PN_OUTPUT  "output"
   std::string output_path;
+# define OPT_MAP_PN_YM_OUTPUT "ym-output"
+  std::string ym_output_path;
 };
 
 MapPnOpts::MapPnOpts(const po::variables_map& options,
@@ -43,6 +47,7 @@ MapPnOpts::MapPnOpts(const po::variables_map& options,
     , dno_data_path(options[OPT_MAP_PN_DNO].as<std::string>())
     , youmail_data_path(options[OPT_MAP_PN_YOUMAIL].as<std::string>())
     , output_path(options[OPT_MAP_PN_OUTPUT].as<std::string>())
+    , ym_output_path(options[OPT_MAP_PN_YM_OUTPUT].as<std::string>())
 {
   if (lrn_data_paths.empty())
     throw folly::ProgramExit(1, "At least 1 positional argument required.");
@@ -63,9 +68,12 @@ class MapPnCommand {
 
   PnMultiReader csv_;
   PnRecordJoiner lrn_joiner_;
-  TableBuilderPtr table_builder_;
+  TableBuilderPtr lrn_builder_;
+  TableBuilderPtr ym_builder_;
   OutputStreamPtr ostream_;
+  OutputStreamPtr ym_ostream_;
   RecordBatchWriterPtr table_writer_;
+  RecordBatchWriterPtr ym_writer_;
 };
 
 /*
@@ -90,17 +98,29 @@ enum {
   LRN_BITS_DNO_SHIFT = 3,
   LRN_BITS_DNO_WIDTH = 3,
   LRN_BITS_DNO_MASK  = LRN_BITS_MASK(DNO),
+  LRN_BITS_YM_SHIFT  = 6,
+  LRN_BITS_YM_WIDTH  = 24,
+  LRN_BITS_YM_MASK   = LRN_BITS_MASK(YM),
   LRN_BITS_PN_SHIFT  = 30,
   LRN_BITS_PN_WIDTH  = 34,
   LRN_BITS_PN_MASK   = LRN_BITS_MASK(PN),
 };
 
 MapPnCommand::MapPnCommand()
-    : table_builder_{
+    : lrn_builder_{
         arrow::RecordBatchBuilder::Make(arrow::schema({
-        arrow::field("pn", arrow::uint64()),
-        arrow::field("rn", arrow::uint64()),
-      }), arrow::default_memory_pool(), LRN_ROWS_PER_CHUNK)
+          arrow::field("pn", arrow::uint64()),
+          arrow::field("rn", arrow::uint64()),
+        }), arrow::default_memory_pool(), LRN_ROWS_PER_CHUNK)
+        .ValueOrDie()
+      }
+    , ym_builder_{
+        arrow::RecordBatchBuilder::Make(arrow::schema({
+          arrow::field("spam_score", arrow::float32()),
+          arrow::field("fraud_prob", arrow::float32()),
+          arrow::field("unlawful_prob", arrow::float32()),
+          arrow::field("tcpa_fraud_prob", arrow::float32()),
+        }), arrow::default_memory_pool(), YM_ROWS_PER_CHUNK)
         .ValueOrDie()
       }
 {}
@@ -108,8 +128,13 @@ MapPnCommand::MapPnCommand()
 arrow::Status MapPnCommand::main(const MapPnOpts &options) {
   PnRecord rec;
   std::shared_ptr<arrow::RecordBatch> record;
-  auto *pnBuilder = table_builder_->GetFieldAs<arrow::UInt64Builder>(0);
-  auto *rnBuilder = table_builder_->GetFieldAs<arrow::UInt64Builder>(1);
+
+  auto& pn_builder = *lrn_builder_->GetFieldAs<arrow::UInt64Builder>(0);
+  auto& rn_builder = *lrn_builder_->GetFieldAs<arrow::UInt64Builder>(1);
+  auto& spam_score = *ym_builder_->GetFieldAs<arrow::FloatBuilder>(0);
+  auto& fraud_prob = *ym_builder_->GetFieldAs<arrow::FloatBuilder>(1);
+  auto& unlawful_prob = *ym_builder_->GetFieldAs<arrow::FloatBuilder>(2);
+  auto& tcpa_fraud_prob = *ym_builder_->GetFieldAs<arrow::FloatBuilder>(3);
 
   csv_.lrn.clear();
   csv_.lrn.reserve(options.lrn_data_paths.size());
@@ -124,14 +149,20 @@ arrow::Status MapPnCommand::main(const MapPnOpts &options) {
   ARROW_ASSIGN_OR_RAISE(ostream_,
                         arrow::io::FileOutputStream::Open(options.output_path));
   ARROW_ASSIGN_OR_RAISE(table_writer_,
-                        arrow::ipc::MakeFileWriter(ostream_, table_builder_->schema()));
+                        arrow::ipc::MakeFileWriter(ostream_, lrn_builder_->schema()));
+
+  ARROW_ASSIGN_OR_RAISE(ym_ostream_,
+                        arrow::io::FileOutputStream::Open(options.ym_output_path));
+  ARROW_ASSIGN_OR_RAISE(ym_writer_,
+                        arrow::ipc::MakeFileWriter(ym_ostream_, ym_builder_->schema()));
 
   lrn_joiner_.Start(csv_);
 
-  int64_t tb = 0;
+  uint32_t ym_id = 0;
+  int64_t tb = 0, ytb = 0;
 
   for (; lrn_joiner_.NextRow(csv_, rec); ) {
-    uint64_t pn = rec.lrn.pn | rec.dnc.pn | rec.dno.pn;
+    uint64_t pn = rec.lrn.pn | rec.dnc.pn | rec.dno.pn | rec.youmail.pn;
     uint64_t pn_bits = pn << LRN_BITS_PN_SHIFT;
     uint64_t rn_bits = rec.lrn.rn << LRN_BITS_PN_SHIFT;
 
@@ -144,16 +175,36 @@ arrow::Status MapPnCommand::main(const MapPnOpts &options) {
     if (rec.dno.pn) /* encode DNO type */
       pn_bits |= rec.dno.type << LRN_BITS_DNO_SHIFT;
 
-    ARROW_RETURN_NOT_OK(pnBuilder->Append(pn_bits));
-    ARROW_RETURN_NOT_OK(rnBuilder->Append(rn_bits));
+    if (rec.youmail.pn) { /* encode YouMail id */
+      pn_bits |= ym_id++ << LRN_BITS_YM_SHIFT;
+      ARROW_RETURN_NOT_OK(spam_score.Append(rec.youmail.spam_score));
+      ARROW_RETURN_NOT_OK(fraud_prob.Append(rec.youmail.fraud_prob));
+      ARROW_RETURN_NOT_OK(unlawful_prob.Append(rec.youmail.unlawful_prob));
+      ARROW_RETURN_NOT_OK(tcpa_fraud_prob.Append(rec.youmail.tcpa_fraud_prob));
+    } else {
+      pn_bits |= LRN_BITS_YM_MASK;
+    }
 
-    if ((lrn_joiner_.NumRows() % LRN_ROWS_PER_CHUNK) == 0) {
-      ARROW_ASSIGN_OR_RAISE(record, table_builder_->Flush());
+    ARROW_RETURN_NOT_OK(pn_builder.Append(pn_bits));
+    ARROW_RETURN_NOT_OK(rn_builder.Append(rn_bits));
+
+    if (pn_builder.length() == LRN_ROWS_PER_CHUNK) {
+      ARROW_ASSIGN_OR_RAISE(record, lrn_builder_->Flush());
       ARROW_RETURN_NOT_OK(table_writer_->WriteRecordBatch(*record));
 
-      if (lrn_joiner_.NumRows() <= 20 * LRN_ROWS_PER_CHUNK) {
-        std::cerr << "tell: " << ostream_->Tell().ValueOrDie() - tb << std::endl;
-        ostream_->Tell().Value(&tb).Warn();
+      if (lrn_joiner_.NumRows() <= 10 * LRN_ROWS_PER_CHUNK) {
+        LOG(INFO) << "tell: " << ostream_->Tell().ValueOrDie() - tb << std::endl;
+        CHECK(ostream_->Tell().Value(&tb).ok());
+      }
+    }
+
+    if (spam_score.length() == YM_ROWS_PER_CHUNK) {
+      ARROW_ASSIGN_OR_RAISE(record, ym_builder_->Flush());
+      ARROW_RETURN_NOT_OK(ym_writer_->WriteRecordBatch(*record));
+
+      if (ym_id <= 10 * YM_ROWS_PER_CHUNK) {
+        LOG(INFO) << "ytell: " << ym_ostream_->Tell().ValueOrDie() - ytb << std::endl;
+        CHECK(ym_ostream_->Tell().Value(&ytb).ok());
       }
     }
   }
@@ -162,19 +213,29 @@ arrow::Status MapPnCommand::main(const MapPnOpts &options) {
     lrn.Close();
   csv_.dnc.Close();
   csv_.dno.Close();
+  csv_.youmail.Close();
 
   for (auto &lrn : csv_.lrn)
     printf("#lrn_rows: %zu\n", lrn.NumRows()); // TODO: to metadata
   printf("#dnc_rows: %zu\n", csv_.dnc.NumRows());
   printf("#dno_rows: %zu\n", csv_.dno.NumRows());
+  printf("#ym_rows: %zu\n", csv_.youmail.NumRows());
 
-  ARROW_ASSIGN_OR_RAISE(record, table_builder_->Flush(true));
+  ARROW_ASSIGN_OR_RAISE(record, lrn_builder_->Flush(true));
   ARROW_RETURN_NOT_OK(table_writer_->WriteRecordBatch(*record));
   tb = ostream_->Tell().ValueOrDie();
   ARROW_RETURN_NOT_OK(table_writer_->Close());
 
   LOG(INFO) << "Arrow footer bytes: "
             << ostream_->Tell().ValueOrDie() - tb << std::endl;
+
+  ARROW_ASSIGN_OR_RAISE(record, ym_builder_->Flush(true));
+  ARROW_RETURN_NOT_OK(ym_writer_->WriteRecordBatch(*record));
+  ytb = ym_ostream_->Tell().ValueOrDie();
+  ARROW_RETURN_NOT_OK(ym_writer_->Close());
+
+  LOG(INFO) << "YM Arrow footer bytes: "
+            << ym_ostream_->Tell().ValueOrDie() - ytb << std::endl;
 
   return arrow::Status::OK();
 }
@@ -379,11 +440,24 @@ void Query(const po::variables_map& options,
 {
   CHECK_GE(args.size(), 3u);
 
-  auto istream = arrow::io::ReadableFile::Open(args[0])
-    .ValueOrDie();
+  std::shared_ptr<arrow::io::RandomAccessFile> ym_file;
+  std::shared_ptr<arrow::ipc::RecordBatchFileReader> ym_reader;
 
-  auto table_reader = arrow::ipc::RecordBatchFileReader
-    ::Open(istream, arrow::ipc::IpcReadOptions{})
+  if (options.count("youmail")) {
+    ym_file = arrow::io::ReadableFile::Open(options["youmail"].as<std::string>())
+      .ValueOrDie();
+    ym_reader = arrow::ipc::RecordBatchFileReader
+      ::Open(ym_file, arrow::ipc::IpcReadOptions{})
+      .ValueOrDie();
+  }
+
+  std::shared_ptr<arrow::io::RandomAccessFile> lrn_file;
+  std::shared_ptr<arrow::ipc::RecordBatchFileReader> lrn_reader;
+
+  lrn_file = arrow::io::ReadableFile::Open(args[0])
+    .ValueOrDie();
+  lrn_reader = arrow::ipc::RecordBatchFileReader
+    ::Open(lrn_file, arrow::ipc::IpcReadOptions{})
     .ValueOrDie();
 
   LOG(INFO) << "reading pthash...";
@@ -399,11 +473,11 @@ void Query(const po::variables_map& options,
 
     std::cout << "pn: " << query << ' ';
 
-    auto batch = table_reader->ReadRecordBatch(chunk)
+    auto lrn = lrn_reader->ReadRecordBatch(chunk)
       .ValueOrDie();
+    auto pn_column = std::static_pointer_cast<arrow::UInt64Array>(lrn->column(0));
+    auto rn_column = std::static_pointer_cast<arrow::UInt64Array>(lrn->column(1));
 
-    auto pn_column = std::static_pointer_cast<arrow::UInt64Array>(batch->column(0));
-    auto rn_column = std::static_pointer_cast<arrow::UInt64Array>(batch->column(1));
     uint64_t pn_bits = pn_column->Value(pos);
     uint64_t rn_bits = rn_column->Value(pos);
     uint64_t pn = pn_bits >> LRN_BITS_PN_SHIFT;
@@ -419,6 +493,34 @@ void Query(const po::variables_map& options,
       std::cout << "dnc ";
     if (pn_bits & LRN_BITS_DNO_MASK)
       std::cout << "dno: " << ((pn_bits & LRN_BITS_DNO_MASK) >> LRN_BITS_DNO_SHIFT) << ' ';
+
+    uint64_t ym_id = pn_bits & LRN_BITS_YM_MASK;
+    if (ym_id != LRN_BITS_YM_MASK) {
+      ym_id >>= LRN_BITS_YM_SHIFT;
+      if (ym_reader) {
+        uint64_t ychunk = ym_id / YM_ROWS_PER_CHUNK;
+        uint64_t ypos = ym_id % YM_ROWS_PER_CHUNK;
+
+        auto ym = ym_reader->ReadRecordBatch(ychunk)
+          .ValueOrDie();
+        auto c_spam_score  = std::static_pointer_cast<arrow::FloatArray>(ym->column(0));
+        auto c_fraud_prob  = std::static_pointer_cast<arrow::FloatArray>(ym->column(1));
+        auto c_unlawful_prob = std::static_pointer_cast<arrow::FloatArray>(ym->column(2));
+        auto c_tcpa_fraud_prob = std::static_pointer_cast<arrow::FloatArray>(ym->column(3));
+
+        float spam_score = c_spam_score->Value(ypos);
+        float fraud_prob = c_fraud_prob->Value(ypos);
+        float unlawful_prob = c_unlawful_prob->Value(ypos);
+        float tcpa_fraud_prob = c_tcpa_fraud_prob->Value(ypos);
+
+        std::cout << "ym: ["
+                  << spam_score << ", " << fraud_prob << ", "
+                  << unlawful_prob << ", " << tcpa_fraud_prob << "]";
+      } else {
+        std::cout << "ym: " << ym_id;
+      }
+    }
+
     std::cout << std::endl;
   }
 }
@@ -468,7 +570,10 @@ int main(int argc, const char* argv[]) {
        "Example row:\n  +12032614649,ALMOST_CERTAINLY,0.95,0.95,0.95")
       (OPT_MAP_PN_OUTPUT ",O",
        po::value<std::string>()->required(),
-       "Arrow table output path. Required.");
+       "Arrow table output path. Required.")
+      (OPT_MAP_PN_YM_OUTPUT ",Y",
+       po::value<std::string>()->default_value("/dev/null"),
+       "Arrow table output path. Required if YouMail present.");
 
   auto& pthash_cmd = app.addCommand(
       "pthash", "arrow_table_path",
@@ -498,17 +603,19 @@ int main(int argc, const char* argv[]) {
        po::value<std::string>()->required(),
        "Arrow table output path. Required.");
 
-  /*auto& query_cmd = */app.addCommand(
+  auto& query_cmd = app.addCommand(
       "query", "lrn_table_path pthash key",
       "Query PN data for number",
       "",
       Query);
 
+  query_cmd.add_options()
+    ("youmail",
+     po::value<std::string>(),
+     "YouMail database path");
+
   // invert-rn rn_pn.arrow > rn0.arrow
-  // map-rn rn0.arrow >
-  // pthash --pn rn.arrow
-  // permute rn.arrow rn.pthash
-  // final: pn.arrow rn.arrow pn.pthash rn.pthash
+  // verify
 
   return app.run(argc, argv);
 }
