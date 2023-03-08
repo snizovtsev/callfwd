@@ -92,7 +92,7 @@ class MapPnCommand {
   ├─────────────┼────────────┼─────────┼─────┴─────┴─────┤
   │   34 bits   │  24 bits   │ 3 bits  │      Flags      │
   ├─────────────┼────────────┼─────────┼─────┬─────┬─────┤
-  │ 10-digit PN │ YouMail id │   DNO   │     │ DNC │ LRN │
+  │ 10-digit PN │ YouMail id │   DNO   │ DNO │ DNC │ LRN │
   └─────────────┴────────────┴─────────┴─────┴─────┴─────┘
 
    RN column (UInt64)
@@ -112,7 +112,8 @@ class MapPnCommand {
 enum {
   LRN_BITS_LRN_FLAG  = 1ull << 0,
   LRN_BITS_DNC_FLAG  = 1ull << 1,
-  LRN_BITS_RES_FLAG  = 1ull << 2,
+  LRN_BITS_DNO_FLAG  = 1ull << 2,
+  LRN_BITS_FLAG_MASK = (1ull << 3) - 1,
   LRN_BITS_DNO_SHIFT = 3,
   LRN_BITS_DNO_WIDTH = 3,
   LRN_BITS_DNO_MASK  = LRN_BITS_MASK(DNO),
@@ -231,8 +232,10 @@ arrow::Status MapPnCommand::Main(const MapPnOpts &options) {
     if (rec.dnc.pn) /* present in DNC */
       pn_bits |= LRN_BITS_DNC_FLAG;
 
-    if (rec.dno.pn) /* encode DNO type */
-      pn_bits |= rec.dno.type << LRN_BITS_DNO_SHIFT;
+    if (rec.dno.pn) {/* encode DNO type */
+      pn_bits |= (rec.dno.type - 1) << LRN_BITS_DNO_SHIFT;
+      pn_bits |= LRN_BITS_DNO_FLAG;
+    }
 
     if (rec.lrn.pn) { /* present in LRN */
       pn_bits |= LRN_BITS_LRN_FLAG;
@@ -354,13 +357,13 @@ struct BuildPTHashOpts {
 /* Declare the PTHash function. */
 typedef single_phf<murmurhash2_128,        // base hasher
                    dictionary_dictionary,  // encoder type
-                   true                    // minimal
+                   false                   // minimal
                    > pthash128_t;
 
 /* Declare the PTHash function. */
 typedef single_phf<murmurhash2_64,        // base hasher
-                   dictionary_dictionary,  // encoder type
-                   true                    // minimal
+                   dictionary_dictionary, // encoder type
+                   true                   // minimal
                    > pthash64_t;
 
 void BuildPTHash(const po::variables_map& options,
@@ -405,7 +408,7 @@ void BuildPTHash(const po::variables_map& options,
   build_configuration config;
   config.c = options[OPT_PTHASH_C].as<float>();
   config.alpha = options[OPT_PTHASH_ALPHA].as<float>();
-  config.minimal_output = true;  // mphf
+  config.minimal_output = pthash128_t::minimal;  // mphf
   config.verbose_output = true;
 
   pthash128_t f;
@@ -436,7 +439,7 @@ void PermuteHash(const po::variables_map& options,
   LOG(INFO) << "reading pthash...";
   pthash128_t f;
   essentials::load(f, args[1].c_str());
-  LOG(INFO) << "pthash #keys: " << f.num_keys();
+  LOG(INFO) << "pthash space: " << f.table_size();
 
   auto istream = arrow::io::ReadableFile::Open(args[0])
     .ValueOrDie();
@@ -446,7 +449,8 @@ void PermuteHash(const po::variables_map& options,
 
   // TODO: new table may have more chunks if pthash isn't minimal
   auto schema = table_reader->schema();
-  int num_batches = table_reader->num_record_batches();
+  int num_batches = (f.table_size() + LRN_ROWS_PER_CHUNK - 1) / LRN_ROWS_PER_CHUNK;
+  CHECK_GE(num_batches, table_reader->num_record_batches());
   std::vector<arrow::UInt64Builder> pn_chunks(num_batches);
   std::vector<arrow::UInt64Builder> rn_chunks(num_batches);
 
@@ -455,12 +459,12 @@ void PermuteHash(const po::variables_map& options,
   std::vector<uint64_t> zeroes(LRN_ROWS_PER_CHUNK);
   uint64_t tot_rows = 0;
 
-  for (int bi = 0; bi < num_batches; ++bi) {
+  for (int bi = 0; bi < table_reader->num_record_batches(); ++bi) {
     auto batch = table_reader->ReadRecordBatch(bi)
       .ValueOrDie();
 
     uint64_t num_rows = batch->num_rows();
-    if (bi + 1 != num_batches)
+    if (bi + 1 != table_reader->num_record_batches())
       CHECK(num_rows == LRN_ROWS_PER_CHUNK);
     else
       CHECK(num_rows <= LRN_ROWS_PER_CHUNK);
@@ -479,7 +483,7 @@ void PermuteHash(const po::variables_map& options,
       if (/*unlikely*/target_pn.length() == 0) {
         size_t chunk_size = LRN_ROWS_PER_CHUNK;
         if (/*unlikely*/target_chunk + 1 == pn_chunks.size()) {
-          chunk_size = f.num_keys() % LRN_ROWS_PER_CHUNK;
+          chunk_size = f.table_size() % LRN_ROWS_PER_CHUNK;
           if (!chunk_size)
             chunk_size = LRN_ROWS_PER_CHUNK;
         }
@@ -490,11 +494,14 @@ void PermuteHash(const po::variables_map& options,
         tot_rows += chunk_size;
       }
 
+      //LOG(INFO) << target_id << ": " << target_chunk << ' ' << target_row;
+      CHECK_EQ(target_pn[target_row], 0u);
+      CHECK_EQ(target_rn[target_row], 0u);
       target_pn[target_row] = pn_data[row_index];
       target_rn[target_row] = rn_data[row_index];
     }
   }
-  CHECK_EQ(tot_rows, f.num_keys());
+  CHECK_EQ(tot_rows, f.table_size());
 
   LOG(INFO) << "writing result...";
 
@@ -519,7 +526,7 @@ void PermuteHash(const po::variables_map& options,
     .ValueOrDie();
 
   LOG(INFO) << "arrow::Table::Make...";
-  auto lrn_table = arrow::Table::Make(schema, columns, f.num_keys());
+  auto lrn_table = arrow::Table::Make(schema, columns, f.table_size());
   CHECK(lrn_table);
 
   LOG(INFO) << "arrow::Table::WriteTable...";
@@ -555,15 +562,13 @@ void Query(const po::variables_map& options,
   LOG(INFO) << "reading pthash...";
   pthash128_t pthash;
   essentials::load(pthash, args[1].c_str());
-  LOG(INFO) << "pthash #keys: " << pthash.num_keys();
+  LOG(INFO) << "pthash space: " << pthash.table_size();
 
   for (unsigned i = 2; i < args.size(); ++i) {
     uint64_t query = atoll(args[i].c_str());
     uint64_t row_index = pthash(query);
     uint64_t chunk = row_index / LRN_ROWS_PER_CHUNK;
     uint64_t pos = row_index % LRN_ROWS_PER_CHUNK;
-
-    std::cout << "pn: " << query << ' ';
 
     auto lrn = lrn_reader->ReadRecordBatch(chunk)
       .ValueOrDie();
@@ -572,7 +577,17 @@ void Query(const po::variables_map& options,
 
     uint64_t pn_bits = pn_column->Value(pos);
     uint64_t rn_bits = rn_column->Value(pos);
+    uint64_t ym_id = pn_bits & LRN_BITS_YM_MASK;
     uint64_t pn = pn_bits >> LRN_BITS_PN_SHIFT;
+    uint64_t dno_raw = (pn_bits & LRN_BITS_DNO_MASK) >> LRN_BITS_DNO_SHIFT;
+
+    LOG(INFO) << "pthash: " << row_index << " bits: " << pn_bits;
+    std::cout << "pn: " << query << ' ';
+
+    if (pn_bits == 0) {
+      std::cout << "empty slot" << std::endl;
+      continue;
+    }
 
     if (pn != query) {
       std::cout << "not found" << std::endl;
@@ -583,10 +598,9 @@ void Query(const po::variables_map& options,
       std::cout << "rn: " << (rn_bits >> LRN_BITS_PN_SHIFT) << ' ';
     if (pn_bits & LRN_BITS_DNC_FLAG)
       std::cout << "dnc ";
-    if (pn_bits & LRN_BITS_DNO_MASK)
-      std::cout << "dno: " << ((pn_bits & LRN_BITS_DNO_MASK) >> LRN_BITS_DNO_SHIFT) << ' ';
+    if (pn_bits & LRN_BITS_DNO_FLAG)
+      std::cout << "dno: " << dno_raw + 1 << ' ';
 
-    uint64_t ym_id = pn_bits & LRN_BITS_YM_MASK;
     if (ym_id != LRN_BITS_YM_MASK) {
       ym_id >>= LRN_BITS_YM_SHIFT;
       if (ym_reader) {
