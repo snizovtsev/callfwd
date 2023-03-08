@@ -2,3 +2,4 @@
 .idea
 *.log
 /bazel-*
+compile_commands.json
