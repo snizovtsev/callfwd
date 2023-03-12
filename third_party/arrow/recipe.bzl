@@ -74,6 +74,7 @@ glob_hdrs = glob([
 
 glob_srcs = glob([
     "cpp/src/arrow/**/*.cc",
+    "cpp/src/arrow/vendored/datetime/*.cpp",
     "cpp/src/generated/*_generated.h",
 ], exclude = glob_exclude_files + [
     "**/*_test.cc",
