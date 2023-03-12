@@ -47,7 +47,6 @@ struct build_configuration {
         , num_buckets(constants::invalid_num_buckets)
         , num_threads(1)
         , seed(constants::invalid_seed)
-        , ram(static_cast<double>(constants::available_ram) * 0.75)
         , tmp_dir(constants::default_tmp_dirname)
         , minimal_output(false)
         , verbose_output(true) {}
@@ -58,7 +57,6 @@ struct build_configuration {
     uint64_t num_buckets;
     uint64_t num_threads;
     uint64_t seed;
-    uint64_t ram;
     std::string tmp_dir;
     bool minimal_output;
     bool verbose_output;
@@ -137,7 +135,9 @@ void merge_single_block(Pairs const& pairs, Merger& merger, bool verbose) {
     uint64_t num_pairs = pairs.size();
     logger.log();
     for (uint64_t i = 1; i != num_pairs; ++i) {
+        // bucket_id === skew_bucketer(hash.first())
         if (pairs[i].bucket_id == pairs[i - 1].bucket_id) {
+            // payload === hash.second()
             if (PTHASH_LIKELY(pairs[i].payload != pairs[i - 1].payload)) {
                 ++bucket_size;
             } else {

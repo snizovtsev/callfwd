@@ -128,7 +128,7 @@ void search_sequential(uint64_t num_keys, uint64_t num_buckets, uint64_t num_non
 
     uint64_t processed_buckets = 0;
     for (; processed_buckets < num_non_empty_buckets; ++processed_buckets, ++buckets) {
-        auto const& bucket = *buckets;
+        bucket_t const& bucket = *buckets;
         assert(bucket.size() > 0);
 
         for (uint64_t pilot = 0; true; ++pilot) {
