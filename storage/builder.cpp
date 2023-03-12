@@ -5,7 +5,11 @@
 #include <arrow/api.h>
 #include <arrow/io/api.h>
 #include <arrow/ipc/api.h>
+#include <arrow/compute/api.h>
 
+#include <arrow/ipc/feather.h>
+#include <arrow/scalar.h>
+#include <arrow/type_fwd.h>
 #include <glog/logging.h>
 #include <folly/experimental/NestedCommandLineApp.h>
 #include <folly/GroupVarint.h>
@@ -15,7 +19,6 @@
 #include <iostream>
 #include <cstdlib>
 
-using namespace pthash;
 namespace po = ::boost::program_options;
 
 enum {
@@ -355,20 +358,66 @@ struct BuildPTHashOpts {
 };
 
 /* Declare the PTHash function. */
-typedef single_phf<murmurhash2_128,        // base hasher
-                   dictionary_dictionary,  // encoder type
-                   false                   // minimal
-                   > pthash128_t;
+typedef pthash::single_phf<
+  pthash::hash_128,        // base hasher
+  pthash::dictionary_dictionary,  // encoder type
+  false                   // minimal
+  > pthash128_t;
 
-/* Declare the PTHash function. */
-typedef single_phf<murmurhash2_64,        // base hasher
-                   dictionary_dictionary, // encoder type
-                   true                   // minimal
-                   > pthash64_t;
+namespace cp = arrow::compute;
+
+arrow::Status SkewBucketerExec(cp::KernelContext* ctx, const cp::ExecSpan& batch,
+                               cp::ExecResult* out)
+{
+  const uint64_t* pn = batch[0].array.GetValues<uint64_t>(1);
+
+  std::unique_ptr<arrow::ArrayBuilder> builder;
+  RETURN_NOT_OK(arrow::MakeBuilder(ctx->memory_pool(),
+                                   out->array_data()->type,
+                                   &builder));
+  RETURN_NOT_OK(builder->Reserve(batch.length));
+
+  auto struct_ = dynamic_cast<arrow::StructBuilder*>(builder.get());
+  auto bucket = dynamic_cast<arrow::UInt32Builder*>(builder->child(0));
+  auto hashval = dynamic_cast<arrow::UInt64Builder*>(builder->child(1));
+
+  RETURN_NOT_OK(bucket->Reserve(batch.length));
+  RETURN_NOT_OK(hashval->Reserve(batch.length));
+
+  for (int64_t i = 0; i < batch.length; ++i) {
+    RETURN_NOT_OK(bucket->Append(pn[i] % 10));
+    RETURN_NOT_OK(hashval->Append(pn[i] ^ 1231231231231));
+    RETURN_NOT_OK(struct_->Append());
+  }
+
+  RETURN_NOT_OK(builder->FinishInternal(&std::get<std::shared_ptr<arrow::ArrayData>>(out->value)));
+  return arrow::Status::OK();
+}
+
+const cp::FunctionDoc func_doc{
+    "Example function to demonstrate registering an out-of-tree function",
+    "",
+    {"x"},
+    "ExampleFunctionOptions"};
 
 void BuildPTHash(const po::variables_map& options,
                  const std::vector<std::string> &args)
 {
+  auto func = std::make_shared<cp::ScalarFunction>("pthash_skew_bucketer",
+                                                   cp::Arity::Unary(),
+                                                   func_doc);
+  auto out_type = arrow::struct_({
+    arrow::field("bucket", arrow::uint32()),
+    arrow::field("hash", arrow::uint64()),
+  });
+  cp::ScalarKernel kernel({arrow::uint64()}, out_type, SkewBucketerExec /*,init*/);
+  kernel.mem_allocation = cp::MemAllocation::NO_PREALLOCATE;
+  kernel.null_handling = cp::NullHandling::OUTPUT_NOT_NULL;
+  CHECK(func->AddKernel(std::move(kernel)).ok());
+
+  auto registry = cp::GetFunctionRegistry();
+  CHECK(registry->AddFunction(std::move(func)).ok());
+
   std::vector<uint64_t> pn_keys;
   {
     CHECK_EQ(args.size(), 1u);
@@ -377,47 +426,92 @@ void BuildPTHash(const po::variables_map& options,
         ::Open(args[0], arrow::io::FileMode::READ)
         .ValueOrDie();
 
-    auto file_reader = arrow::ipc::RecordBatchFileReader
-        ::Open(istream, arrow::ipc::IpcReadOptions{
-            .included_fields = {0},
-          })
-        .ValueOrDie();
+    // auto file_reader = arrow::ipc::RecordBatchFileReader
+    //     ::Open(istream, arrow::ipc::IpcReadOptions{
+    //         .included_fields = {0},
+    //       })
+    //     .ValueOrDie();
 
-    pn_keys.reserve(file_reader->num_record_batches() * LRN_ROWS_PER_CHUNK);
+    auto reader = arrow::ipc::feather::Reader
+      ::Open(istream)
+      .ValueOrDie();
 
-    auto batch_iter = file_reader->GetRecordBatchGenerator()
-        .ValueOrDie();
+    std::shared_ptr<arrow::Table> lrn_table;
+    CHECK(reader->Read(&lrn_table).ok());
 
-    LOG(INFO) << "decoding keys...";
+    arrow::compute::ExecContext exec_ctx;
+    exec_ctx.set_preallocate_contiguous(false);
+    exec_ctx.set_exec_chunksize(LRN_ROWS_PER_CHUNK);
 
-    for (int i = 0; i < file_reader->num_record_batches(); ++i) {
-      auto pn_column = batch_iter().result().ValueOrDie()->column(0);
-      auto pn_arr = std::dynamic_pointer_cast<arrow::UInt64Array>(pn_column);
+    auto keys = arrow::compute::CallFunction("shift_right",
+                                             {lrn_table->column(0),
+                                              arrow::MakeScalar<uint64_t>(30)},
+                                             &exec_ctx)
+      .ValueOrDie().chunked_array();
 
-      for (std::optional<uint64_t> pn_bits : *pn_arr) {
-        uint64_t pn = *pn_bits >> LRN_BITS_PN_SHIFT;
-        pn_keys.push_back(pn);
-      }
-    }
+    auto result = arrow::compute::CallFunction("pthash_skew_bucketer",
+                                               {keys},
+                                               &exec_ctx)
+      .ValueOrDie().chunked_array();
+
+    std::cout << lrn_table->column(0)->num_chunks() << std::endl;
+    std::cout << result->num_chunks() << std::endl;
+    //std::cout << result->ToString() << std::endl;
+
+    return;
+
+    // pn_keys.reserve(file_reader->num_record_batches() * LRN_ROWS_PER_CHUNK);
+
+    // auto batch_iter = file_reader->GetRecordBatchGenerator()
+    //     .ValueOrDie();
+
+    // LOG(INFO) << "decoding keys...";
+
+    // for (int i = 0; i < file_reader->num_record_batches(); ++i) {
+    //   auto pn_column = batch_iter().result().ValueOrDie()->column(0);
+    //   auto pn_arr = std::dynamic_pointer_cast<arrow::UInt64Array>(pn_column);
+
+    //   for (std::optional<uint64_t> pn_bits : *pn_arr) {
+    //     uint64_t pn = *pn_bits >> LRN_BITS_PN_SHIFT;
+    //     pn_keys.push_back(pn);
+    //   }
+    // }
   }
 
   std::string output_path = options[OPT_PTHASH_OUTPUT]
       .as<std::string>();
 
   /* Set up a build configuration. */
-  build_configuration config;
+  pthash::build_configuration config;
   config.c = options[OPT_PTHASH_C].as<float>();
   config.alpha = options[OPT_PTHASH_ALPHA].as<float>();
   config.minimal_output = pthash128_t::minimal;  // mphf
   config.verbose_output = true;
+  config.num_threads = 8;
+  // config.num_partitions = 8;
 
   pthash128_t f;
 
   /* Build the function in internal memory. */
   LOG(INFO) << "building the function...";
 
-  pthash::internal_memory_builder_single_phf<murmurhash2_128> builder;
+  //pthash::internal_memory_builder_single_phf<pthash::hash_128> builder;
+  pthash::internal_memory_builder_single_phf<pthash::hash_128> builder;
   builder.build_from_keys(pn_keys.begin(), pn_keys.size(), config);
+  LOG(INFO) << "done";
+  return;
+  // for (int attempt = 0; attempt < 10; ++attempt) {
+  //   builder.m_seed = pthash::random_value();
+  //   try {
+  //     builder.build_from_hashes(hash_generator<RandomAccessIterator>(keys, m_seed),
+  //                               pn_keys.size(), config);
+  //     break;
+  //   } catch (seed_runtime_error const& error) {
+  //     LOG(WARN) << "attempt " << attempt + 1 << " failed";
+  //   }
+  //   if (attempt == 9)
+  //     throw pthash::seed_runtime_error();
+  // }
   f.build(builder, config);
 
   /* Compute and print the number of bits spent per key. */
@@ -560,13 +654,13 @@ void Query(const po::variables_map& options,
     .ValueOrDie();
 
   LOG(INFO) << "reading pthash...";
-  pthash128_t pthash;
-  essentials::load(pthash, args[1].c_str());
-  LOG(INFO) << "pthash space: " << pthash.table_size();
+  pthash128_t phf;
+  essentials::load(phf, args[1].c_str());
+  LOG(INFO) << "pthash space: " << phf.table_size();
 
   for (unsigned i = 2; i < args.size(); ++i) {
     uint64_t query = atoll(args[i].c_str());
-    uint64_t row_index = pthash(query);
+    uint64_t row_index = phf(query);
     uint64_t chunk = row_index / LRN_ROWS_PER_CHUNK;
     uint64_t pos = row_index % LRN_ROWS_PER_CHUNK;
 
