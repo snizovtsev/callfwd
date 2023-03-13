@@ -10,7 +10,7 @@
 #include <arrow/ipc/feather.h>
 #include <arrow/scalar.h>
 #include <arrow/type_fwd.h>
-#include <glog/logging.h>
+#include <arrow/util/logging.h>
 #include <folly/experimental/NestedCommandLineApp.h>
 #include <folly/GroupVarint.h>
 
@@ -413,6 +413,7 @@ void BuildPTHash(const po::variables_map& options,
   cp::ScalarKernel kernel({arrow::uint64()}, out_type, SkewBucketerExec /*,init*/);
   kernel.mem_allocation = cp::MemAllocation::NO_PREALLOCATE;
   kernel.null_handling = cp::NullHandling::OUTPUT_NOT_NULL;
+  kernel.parallelizable = true;
   CHECK(func->AddKernel(std::move(kernel)).ok());
 
   auto registry = cp::GetFunctionRegistry();
@@ -426,7 +427,7 @@ void BuildPTHash(const po::variables_map& options,
         ::Open(args[0], arrow::io::FileMode::READ)
         .ValueOrDie();
 
-    // auto file_reader = arrow::ipc::RecordBatchFileReader
+    // auto reader = arrow::ipc::RecordBatchFileReader
     //     ::Open(istream, arrow::ipc::IpcReadOptions{
     //         .included_fields = {0},
     //       })
@@ -438,6 +439,53 @@ void BuildPTHash(const po::variables_map& options,
 
     std::shared_ptr<arrow::Table> lrn_table;
     CHECK(reader->Read(&lrn_table).ok());
+
+    // construct an ExecPlan first to hold your nodes
+    std::shared_ptr<arrow::Table> output_table;
+    std::shared_ptr<cp::ExecPlan> plan = cp::ExecPlan
+      ::Make(cp::default_exec_context())
+      .ValueOrDie();
+
+    cp::Declaration::Sequence({
+          {"table_source", cp::TableSourceNodeOptions{lrn_table, /*max_batch_size*/}},
+          {"project", cp::ProjectNodeOptions{
+            {cp::call("shift_right", {
+                cp::field_ref("pn_bits"),
+                cp::literal<uint64_t>(30u)})},
+            {"pn"}
+          }},
+          {"project", cp::ProjectNodeOptions{
+            {cp::call("pthash_skew_bucketer", {cp::field_ref("pn")})},
+            {"pthash_in"}
+          }},
+          {"project", cp::ProjectNodeOptions{
+            {cp::call("add", {
+                cp::field_ref({0, 0}),
+                cp::literal<uint64_t>(100u)})},
+            {"100 + bucket"}
+          }},
+          {"table_sink", cp::TableSinkNodeOptions{&output_table}}
+        })
+      .AddToPlan(plan.get())
+      .ValueOrDie();
+
+    LOG(INFO) << "Validate plan";
+    CHECK(plan->Validate().ok());
+
+    LOG(INFO) << "Start plan";
+    CHECK(plan->StartProducing().ok());
+
+    LOG(INFO) << "Waiting...";
+
+    plan->finished().result().ValueOrDie();
+
+    LOG(INFO) << "Finished plan";
+
+    std::cout << "#old batches " << lrn_table->column(0)->num_chunks() << std::endl;
+    std::cout << "#new batches " << output_table->column(0)->num_chunks() << std::endl;
+    std::cout << output_table->ToString() << std::endl;
+
+    return;
 
     arrow::compute::ExecContext exec_ctx;
     exec_ctx.set_preallocate_contiguous(false);
@@ -457,8 +505,6 @@ void BuildPTHash(const po::variables_map& options,
     std::cout << lrn_table->column(0)->num_chunks() << std::endl;
     std::cout << result->num_chunks() << std::endl;
     //std::cout << result->ToString() << std::endl;
-
-    return;
 
     // pn_keys.reserve(file_reader->num_record_batches() * LRN_ROWS_PER_CHUNK);
 
