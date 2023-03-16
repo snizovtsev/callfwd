@@ -384,9 +384,14 @@ arrow::Status SkewBucketerExec(cp::KernelContext* ctx, const cp::ExecSpan& batch
   RETURN_NOT_OK(bucket->Reserve(batch.length));
   RETURN_NOT_OK(hashval->Reserve(batch.length));
 
+  constexpr uint64_t num_keys = 1115007295;
+  constexpr uint64_t num_buckets =
+    std::ceil((6.0 * num_keys) / std::log2(num_keys));
+
   for (int64_t i = 0; i < batch.length; ++i) {
-    RETURN_NOT_OK(bucket->Append(pn[i] % 10));
-    RETURN_NOT_OK(hashval->Append(pn[i] ^ 1231231231231));
+    //auto hv = murmur3_64(pn[i], 123456);
+    // RETURN_NOT_OK(bucket->Append(hv.first % num_buckets));
+    // RETURN_NOT_OK(hashval->Append(hv.second));
     RETURN_NOT_OK(struct_->Append());
   }
 
@@ -394,18 +399,14 @@ arrow::Status SkewBucketerExec(cp::KernelContext* ctx, const cp::ExecSpan& batch
   return arrow::Status::OK();
 }
 
-const cp::FunctionDoc func_doc{
-    "Example function to demonstrate registering an out-of-tree function",
-    "",
-    {"x"},
-    "ExampleFunctionOptions"};
+void RegisterCustomFunctions(cp::FunctionRegistry* registry);
 
 void BuildPTHash(const po::variables_map& options,
                  const std::vector<std::string> &args)
 {
   auto func = std::make_shared<cp::ScalarFunction>("pthash_skew_bucketer",
                                                    cp::Arity::Unary(),
-                                                   func_doc);
+                                                   cp::FunctionDoc::Empty());
   auto out_type = arrow::struct_({
     arrow::field("bucket", arrow::uint32()),
     arrow::field("hash", arrow::uint64()),
@@ -417,6 +418,7 @@ void BuildPTHash(const po::variables_map& options,
   CHECK(func->AddKernel(std::move(kernel)).ok());
 
   auto registry = cp::GetFunctionRegistry();
+  RegisterCustomFunctions(registry);
   CHECK(registry->AddFunction(std::move(func)).ok());
 
   std::vector<uint64_t> pn_keys;
@@ -443,27 +445,41 @@ void BuildPTHash(const po::variables_map& options,
     // construct an ExecPlan first to hold your nodes
     std::shared_ptr<arrow::Table> output_table;
     std::shared_ptr<cp::ExecPlan> plan = cp::ExecPlan
-      ::Make(cp::default_exec_context())
+      ::Make(cp::threaded_exec_context())
       .ValueOrDie();
+
+    LOG(INFO) << "use_threads: " << cp::default_exec_context()->use_threads();
+    if (cp::default_exec_context()->executor())
+      LOG(INFO) << "threads: " << cp::default_exec_context()->executor()->GetCapacity();
 
     cp::Declaration::Sequence({
           {"table_source", cp::TableSourceNodeOptions{lrn_table, /*max_batch_size*/}},
           {"project", cp::ProjectNodeOptions{
             {cp::call("shift_right", {
                 cp::field_ref("pn_bits"),
-                cp::literal<uint64_t>(30u)})},
+                cp::literal(UINT64_C(30))})},
             {"pn"}
           }},
-          {"project", cp::ProjectNodeOptions{
-            {cp::call("pthash_skew_bucketer", {cp::field_ref("pn")})},
-            {"pthash_in"}
+          {"aggregate", cp::AggregateNodeOptions{
+            /*aggregates=*/ {{"x_bucket_counter", nullptr, "pn", "out"}},
           }},
-          {"project", cp::ProjectNodeOptions{
-            {cp::call("add", {
-                cp::field_ref({0, 0}),
-                cp::literal<uint64_t>(100u)})},
-            {"100 + bucket"}
-          }},
+          // {"project", cp::ProjectNodeOptions{
+          //   {cp::call("pthash_skew_bucketer", {cp::field_ref("pn")})},
+          //   {"pthash_in"}
+          // }},
+          // {"project", cp::ProjectNodeOptions{
+          //   {cp::call("add", {
+          //       cp::field_ref({0, 0}),
+          //       cp::literal<uint32_t>(0u)}),
+          //    cp::call("add", {
+          //       cp::field_ref({0, 1}),
+          //       cp::literal<uint64_t>(0u)})},
+          //   {"bucket", "hash"}
+          // }},
+          //{"aggregate", cp::AggregateNodeOptions{
+          //  /*aggregates=*/ {{"hash_list", nullptr, "hash", "out"}},
+          //  /*keys=*/ {"bucket"}
+          //}},
           {"table_sink", cp::TableSinkNodeOptions{&output_table}}
         })
       .AddToPlan(plan.get())
@@ -483,6 +499,7 @@ void BuildPTHash(const po::variables_map& options,
 
     std::cout << "#old batches " << lrn_table->column(0)->num_chunks() << std::endl;
     std::cout << "#new batches " << output_table->column(0)->num_chunks() << std::endl;
+
     std::cout << output_table->ToString() << std::endl;
 
     return;

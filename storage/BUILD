@@ -8,6 +8,9 @@ cc_binary(
     name = "builder",
     srcs = [
         "builder.cpp",
+        "bit_magic.hpp",
+        "compute_kernels.cpp",
+        "compute_kernels.hpp",
         "csv_reader.cpp",
         "csv_reader.hpp",
         "csv_records.hpp",
