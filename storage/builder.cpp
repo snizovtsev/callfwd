@@ -1,5 +1,6 @@
 #include "csv_reader.hpp"
 
+#include "compute_kernels.hpp"
 #include "pthash/pthash.hpp"
 
 #include <arrow/api.h>
@@ -264,7 +265,7 @@ arrow::Status MapPnCommand::Main(const MapPnOpts &options) {
 
       if (lrn_joiner_.NumRows() <= 10 * LRN_ROWS_PER_CHUNK) {
         LOG(INFO) << "tell: " << ostream_->Tell().ValueOrDie() - tb << std::endl;
-        CHECK(ostream_->Tell().Value(&tb).ok());
+        ARROW_CHECK_OK(ostream_->Tell().Value(&tb));
       }
     }
 
@@ -274,7 +275,7 @@ arrow::Status MapPnCommand::Main(const MapPnOpts &options) {
 
       if (ym_id <= 10 * YM_ROWS_PER_CHUNK) {
         LOG(INFO) << "ytell: " << ym_ostream_->Tell().ValueOrDie() - ytb << std::endl;
-        CHECK(ym_ostream_->Tell().Value(&ytb).ok());
+        ARROW_CHECK_OK(ym_ostream_->Tell().Value(&ytb));
       }
     }
   }
@@ -316,7 +317,7 @@ arrow::Status MapPnCommand::Main(const MapPnOpts &options) {
       ARROW_ASSIGN_OR_RAISE(record, rn_builder_->Flush());
       ARROW_RETURN_NOT_OK(rn_writer_->WriteRecordBatch(*record));
       LOG_EVERY_N(INFO, 10) << "rtell: " << rn_ostream_->Tell().ValueOrDie() - rtb << std::endl;
-      CHECK(rn_ostream_->Tell().Value(&rtb).ok());
+      ARROW_CHECK_OK(rn_ostream_->Tell().Value(&rtb));
     }
   }
 
@@ -366,183 +367,11 @@ typedef pthash::single_phf<
 
 namespace cp = arrow::compute;
 
-arrow::Status SkewBucketerExec(cp::KernelContext* ctx, const cp::ExecSpan& batch,
-                               cp::ExecResult* out)
-{
-  const uint64_t* pn = batch[0].array.GetValues<uint64_t>(1);
-
-  std::unique_ptr<arrow::ArrayBuilder> builder;
-  RETURN_NOT_OK(arrow::MakeBuilder(ctx->memory_pool(),
-                                   out->array_data()->type,
-                                   &builder));
-  RETURN_NOT_OK(builder->Reserve(batch.length));
-
-  auto struct_ = dynamic_cast<arrow::StructBuilder*>(builder.get());
-  auto bucket = dynamic_cast<arrow::UInt32Builder*>(builder->child(0));
-  auto hashval = dynamic_cast<arrow::UInt64Builder*>(builder->child(1));
-
-  RETURN_NOT_OK(bucket->Reserve(batch.length));
-  RETURN_NOT_OK(hashval->Reserve(batch.length));
-
-  constexpr uint64_t num_keys = 1115007295;
-  constexpr uint64_t num_buckets =
-    std::ceil((6.0 * num_keys) / std::log2(num_keys));
-
-  for (int64_t i = 0; i < batch.length; ++i) {
-    //auto hv = murmur3_64(pn[i], 123456);
-    // RETURN_NOT_OK(bucket->Append(hv.first % num_buckets));
-    // RETURN_NOT_OK(hashval->Append(hv.second));
-    RETURN_NOT_OK(struct_->Append());
-  }
-
-  RETURN_NOT_OK(builder->FinishInternal(&std::get<std::shared_ptr<arrow::ArrayData>>(out->value)));
-  return arrow::Status::OK();
-}
-
-void RegisterCustomFunctions(cp::FunctionRegistry* registry);
-
 void BuildPTHash(const po::variables_map& options,
                  const std::vector<std::string> &args)
 {
-  auto func = std::make_shared<cp::ScalarFunction>("pthash_skew_bucketer",
-                                                   cp::Arity::Unary(),
-                                                   cp::FunctionDoc::Empty());
-  auto out_type = arrow::struct_({
-    arrow::field("bucket", arrow::uint32()),
-    arrow::field("hash", arrow::uint64()),
-  });
-  cp::ScalarKernel kernel({arrow::uint64()}, out_type, SkewBucketerExec /*,init*/);
-  kernel.mem_allocation = cp::MemAllocation::NO_PREALLOCATE;
-  kernel.null_handling = cp::NullHandling::OUTPUT_NOT_NULL;
-  kernel.parallelizable = true;
-  CHECK(func->AddKernel(std::move(kernel)).ok());
-
-  auto registry = cp::GetFunctionRegistry();
-  RegisterCustomFunctions(registry);
-  CHECK(registry->AddFunction(std::move(func)).ok());
-
-  std::vector<uint64_t> pn_keys;
-  {
-    CHECK_EQ(args.size(), 1u);
-
-    auto istream = arrow::io::MemoryMappedFile
-        ::Open(args[0], arrow::io::FileMode::READ)
-        .ValueOrDie();
-
-    // auto reader = arrow::ipc::RecordBatchFileReader
-    //     ::Open(istream, arrow::ipc::IpcReadOptions{
-    //         .included_fields = {0},
-    //       })
-    //     .ValueOrDie();
-
-    auto reader = arrow::ipc::feather::Reader
-      ::Open(istream)
-      .ValueOrDie();
-
-    std::shared_ptr<arrow::Table> lrn_table;
-    CHECK(reader->Read(&lrn_table).ok());
-
-    // construct an ExecPlan first to hold your nodes
-    std::shared_ptr<arrow::Table> output_table;
-    std::shared_ptr<cp::ExecPlan> plan = cp::ExecPlan
-      ::Make(cp::threaded_exec_context())
-      .ValueOrDie();
-
-    LOG(INFO) << "use_threads: " << cp::default_exec_context()->use_threads();
-    if (cp::default_exec_context()->executor())
-      LOG(INFO) << "threads: " << cp::default_exec_context()->executor()->GetCapacity();
-
-    cp::Declaration::Sequence({
-          {"table_source", cp::TableSourceNodeOptions{lrn_table, /*max_batch_size*/}},
-          {"project", cp::ProjectNodeOptions{
-            {cp::call("shift_right", {
-                cp::field_ref("pn_bits"),
-                cp::literal(UINT64_C(30))})},
-            {"pn"}
-          }},
-          {"aggregate", cp::AggregateNodeOptions{
-            /*aggregates=*/ {{"x_bucket_counter", nullptr, "pn", "out"}},
-          }},
-          // {"project", cp::ProjectNodeOptions{
-          //   {cp::call("pthash_skew_bucketer", {cp::field_ref("pn")})},
-          //   {"pthash_in"}
-          // }},
-          // {"project", cp::ProjectNodeOptions{
-          //   {cp::call("add", {
-          //       cp::field_ref({0, 0}),
-          //       cp::literal<uint32_t>(0u)}),
-          //    cp::call("add", {
-          //       cp::field_ref({0, 1}),
-          //       cp::literal<uint64_t>(0u)})},
-          //   {"bucket", "hash"}
-          // }},
-          //{"aggregate", cp::AggregateNodeOptions{
-          //  /*aggregates=*/ {{"hash_list", nullptr, "hash", "out"}},
-          //  /*keys=*/ {"bucket"}
-          //}},
-          {"table_sink", cp::TableSinkNodeOptions{&output_table}}
-        })
-      .AddToPlan(plan.get())
-      .ValueOrDie();
-
-    LOG(INFO) << "Validate plan";
-    CHECK(plan->Validate().ok());
-
-    LOG(INFO) << "Start plan";
-    CHECK(plan->StartProducing().ok());
-
-    LOG(INFO) << "Waiting...";
-
-    plan->finished().result().ValueOrDie();
-
-    LOG(INFO) << "Finished plan";
-
-    std::cout << "#old batches " << lrn_table->column(0)->num_chunks() << std::endl;
-    std::cout << "#new batches " << output_table->column(0)->num_chunks() << std::endl;
-
-    std::cout << output_table->ToString() << std::endl;
-
-    return;
-
-    arrow::compute::ExecContext exec_ctx;
-    exec_ctx.set_preallocate_contiguous(false);
-    exec_ctx.set_exec_chunksize(LRN_ROWS_PER_CHUNK);
-
-    auto keys = arrow::compute::CallFunction("shift_right",
-                                             {lrn_table->column(0),
-                                              arrow::MakeScalar<uint64_t>(30)},
-                                             &exec_ctx)
-      .ValueOrDie().chunked_array();
-
-    auto result = arrow::compute::CallFunction("pthash_skew_bucketer",
-                                               {keys},
-                                               &exec_ctx)
-      .ValueOrDie().chunked_array();
-
-    std::cout << lrn_table->column(0)->num_chunks() << std::endl;
-    std::cout << result->num_chunks() << std::endl;
-    //std::cout << result->ToString() << std::endl;
-
-    // pn_keys.reserve(file_reader->num_record_batches() * LRN_ROWS_PER_CHUNK);
-
-    // auto batch_iter = file_reader->GetRecordBatchGenerator()
-    //     .ValueOrDie();
-
-    // LOG(INFO) << "decoding keys...";
-
-    // for (int i = 0; i < file_reader->num_record_batches(); ++i) {
-    //   auto pn_column = batch_iter().result().ValueOrDie()->column(0);
-    //   auto pn_arr = std::dynamic_pointer_cast<arrow::UInt64Array>(pn_column);
-
-    //   for (std::optional<uint64_t> pn_bits : *pn_arr) {
-    //     uint64_t pn = *pn_bits >> LRN_BITS_PN_SHIFT;
-    //     pn_keys.push_back(pn);
-    //   }
-    // }
-  }
-
-  std::string output_path = options[OPT_PTHASH_OUTPUT]
-      .as<std::string>();
+  RegisterCustomFunctions(cp::GetFunctionRegistry());
+  CHECK_EQ(args.size(), 1u);
 
   /* Set up a build configuration. */
   pthash::build_configuration config;
@@ -553,6 +382,90 @@ void BuildPTHash(const po::variables_map& options,
   config.num_threads = 8;
   // config.num_partitions = 8;
 
+  auto istream = arrow::io::MemoryMappedFile
+    ::Open(args[0], arrow::io::FileMode::READ)
+    .ValueOrDie();
+
+  // auto reader = arrow::ipc::RecordBatchFileReader
+  //     ::Open(istream, arrow::ipc::IpcReadOptions{
+  //         .included_fields = {0},
+  //       })
+  //     .ValueOrDie();
+
+  auto reader = arrow::ipc::feather::Reader
+    ::Open(istream)
+    .ValueOrDie();
+
+  std::shared_ptr<arrow::Table> lrn_table;
+  ARROW_CHECK_OK(reader->Read(&lrn_table));
+
+  uint64_t num_rows = lrn_table->num_rows();
+  LOG(INFO) << "#rows: " << num_rows;
+  LOG(INFO) << "#batches " << lrn_table->column(0)->num_chunks();
+
+  config.num_buckets =
+    std::ceil((config.c * num_rows) / std::log2(num_rows));
+
+  // construct an ExecPlan first to hold your nodes
+  cp::ExecContext* exec_context = cp::threaded_exec_context();
+  auto plan = cp::ExecPlan::Make(exec_context)
+    .ValueOrDie();
+
+  /* Plan variables */
+  std::shared_ptr<arrow::Table> buckets;
+  auto bucketer_opts = std::make_shared<BucketerOptions>(config.num_buckets);
+
+  cp::Declaration::Sequence({
+    {"table_source", cp::TableSourceNodeOptions{lrn_table, /*max_batch_size*/}},
+    {"project", cp::ProjectNodeOptions{
+      {cp::call("shift_right", {
+          cp::field_ref("pn_bits"),
+          cp::literal(UINT64_C(30))})},
+      {"pn"}
+    }},
+    {"aggregate", cp::AggregateNodeOptions{
+      {{"x_bucket_counter", bucketer_opts, "pn", "size"}},
+    }},
+    {"table_sink", cp::TableSinkNodeOptions{&buckets}}
+  }).AddToPlan(plan.get())
+    .ValueOrDie();
+
+  LOG(INFO) << "Validate plan";
+  ARROW_CHECK_OK(plan->Validate());
+
+  LOG(INFO) << "Running...";
+  ARROW_CHECK_OK(plan->StartProducing());
+  plan->finished().result()
+    .ValueOrDie();
+
+  LOG(INFO) << "Finished plan";
+  CHECK_EQ(buckets->column(0)->num_chunks(), 1);
+  LOG(INFO) << "#buckets " << buckets->column(0)->chunk(0)->length();
+
+  LOG(INFO) << "Sorting buckets by size";
+  auto bucket_order = cp::SortIndices(buckets, cp::SortOptions{
+      {cp::SortKey{"size", cp::SortOrder::Descending}}
+    }, exec_context)
+    .ValueOrDie();
+
+  buckets = arrow::Table::Make(
+    arrow::schema({
+      arrow::field("size", arrow::uint32()),
+      arrow::field("order", arrow::uint64()),
+    }),
+    { buckets->column(0)->chunk(0),
+      std::move(bucket_order) }
+  );
+
+  std::cout << "Bucket table:" << std::endl
+            << buckets->ToString() << std::endl;
+  ARROW_CHECK_OK(buckets->ValidateFull());
+
+  return;
+
+  std::string output_path = options[OPT_PTHASH_OUTPUT]
+      .as<std::string>();
+
   pthash128_t f;
 
   /* Build the function in internal memory. */
@@ -560,21 +473,8 @@ void BuildPTHash(const po::variables_map& options,
 
   //pthash::internal_memory_builder_single_phf<pthash::hash_128> builder;
   pthash::internal_memory_builder_single_phf<pthash::hash_128> builder;
-  builder.build_from_keys(pn_keys.begin(), pn_keys.size(), config);
+  //builder.build_from_keys(pn_keys.begin(), pn_keys.size(), config);
   LOG(INFO) << "done";
-  return;
-  // for (int attempt = 0; attempt < 10; ++attempt) {
-  //   builder.m_seed = pthash::random_value();
-  //   try {
-  //     builder.build_from_hashes(hash_generator<RandomAccessIterator>(keys, m_seed),
-  //                               pn_keys.size(), config);
-  //     break;
-  //   } catch (seed_runtime_error const& error) {
-  //     LOG(WARN) << "attempt " << attempt + 1 << " failed";
-  //   }
-  //   if (attempt == 9)
-  //     throw pthash::seed_runtime_error();
-  // }
   f.build(builder, config);
 
   /* Compute and print the number of bits spent per key. */
@@ -646,8 +546,8 @@ void PermuteHash(const po::variables_map& options,
         }
 
         zeroes.resize(chunk_size);
-        CHECK(target_pn.AppendValues(zeroes).ok());
-        CHECK(target_rn.AppendValues(zeroes).ok());
+        ARROW_CHECK_OK(target_pn.AppendValues(zeroes));
+        ARROW_CHECK_OK(target_rn.AppendValues(zeroes));
         tot_rows += chunk_size;
       }
 
@@ -687,8 +587,8 @@ void PermuteHash(const po::variables_map& options,
   CHECK(lrn_table);
 
   LOG(INFO) << "arrow::Table::WriteTable...";
-  CHECK(table_writer->WriteTable(*lrn_table).ok());
-  CHECK(table_writer->Close().ok());
+  ARROW_CHECK_OK(table_writer->WriteTable(*lrn_table));
+  ARROW_CHECK_OK(table_writer->Close());
 }
 
 void Query(const po::variables_map& options,
