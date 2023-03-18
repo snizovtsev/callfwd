@@ -103,6 +103,7 @@ cc_library(
         "ARROW_HAVE_BMI2",
         "ARROW_HAVE_SSE4_2",
         "ARROW_USE_GLOG",
+        "ARROW_USE_NATIVE_INT128",
     ],
     hdrs = glob_hdrs + ["cpp/src/arrow/util/config.h"],
     srcs = glob_srcs,
