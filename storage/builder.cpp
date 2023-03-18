@@ -1,12 +1,14 @@
 #include "csv_reader.hpp"
 
 #include "compute_kernels.hpp"
+#include "glog/logging.h"
 #include "pthash/pthash.hpp"
 
 #include <arrow/api.h>
 #include <arrow/io/api.h>
 #include <arrow/ipc/api.h>
 #include <arrow/compute/api.h>
+#include <arrow/compute/exec/query_context.h>
 
 #include <arrow/ipc/feather.h>
 #include <arrow/scalar.h>
@@ -18,6 +20,7 @@
 #include <map>
 #include <memory>
 #include <iostream>
+#include <functional>
 #include <cstdlib>
 
 namespace po = ::boost::program_options;
@@ -386,27 +389,30 @@ void BuildPTHash(const po::variables_map& options,
     ::Open(args[0], arrow::io::FileMode::READ)
     .ValueOrDie();
 
-  // auto reader = arrow::ipc::RecordBatchFileReader
-  //     ::Open(istream, arrow::ipc::IpcReadOptions{
-  //         .included_fields = {0},
-  //       })
-  //     .ValueOrDie();
-
-  auto reader = arrow::ipc::feather::Reader
-    ::Open(istream)
+  auto reader = arrow::ipc::RecordBatchFileReader
+      ::Open(istream, arrow::ipc::IpcReadOptions{
+          .included_fields = {0},
+        })
+      .ValueOrDie();
+  auto async_batch_gen = reader->GetRecordBatchGenerator()
     .ValueOrDie();
 
-  std::shared_ptr<arrow::Table> lrn_table;
-  ARROW_CHECK_OK(reader->Read(&lrn_table));
+  auto open_batch_gen = [=]() {
+    return arrow::MakeFunctionIterator([=]() {
+      return async_batch_gen().result();
+    });
+  };
 
-  uint64_t num_rows = lrn_table->num_rows();
+  uint64_t num_rows = (reader->num_record_batches() - 1) * LRN_ROWS_PER_CHUNK
+    + reader->ReadRecordBatch(reader->num_record_batches() - 1).ValueOrDie()->num_rows();
   LOG(INFO) << "#rows: " << num_rows;
-  LOG(INFO) << "#batches " << lrn_table->column(0)->num_chunks();
+  LOG(INFO) << "#batches " << reader->num_record_batches();
 
   config.num_buckets =
     std::ceil((config.c * num_rows) / std::log2(num_rows));
 
   // construct an ExecPlan first to hold your nodes
+  LOG(INFO) << "Make plan";
   cp::ExecContext* exec_context = cp::threaded_exec_context();
   auto plan = cp::ExecPlan::Make(exec_context)
     .ValueOrDie();
@@ -415,8 +421,11 @@ void BuildPTHash(const po::variables_map& options,
   std::shared_ptr<arrow::Table> buckets;
   auto bucketer_opts = std::make_shared<BucketerOptions>(config.num_buckets);
 
+  LOG(INFO) << "Build plan";
   cp::Declaration::Sequence({
-    {"table_source", cp::TableSourceNodeOptions{lrn_table, /*max_batch_size*/}},
+    {"record_batch_source", cp::RecordBatchSourceNodeOptions{
+        reader->schema(), open_batch_gen
+    }},
     {"project", cp::ProjectNodeOptions{
       {cp::call("shift_right", {
           cp::field_ref("pn_bits"),
@@ -448,9 +457,15 @@ void BuildPTHash(const po::variables_map& options,
     }, exec_context)
     .ValueOrDie();
 
+  uint64_t top_index = std::static_pointer_cast<arrow::UInt64Array>(bucket_order)
+    ->Value(0);
+  uint64_t top_count = std::static_pointer_cast<arrow::UInt16Array>(buckets->column(0)->chunk(0))
+    ->Value(top_index);
+  LOG(INFO) << "Max bucket size: " << top_count;
+
   buckets = arrow::Table::Make(
     arrow::schema({
-      arrow::field("size", arrow::uint32()),
+      arrow::field("size", arrow::uint16()),
       arrow::field("order", arrow::uint64()),
     }),
     { buckets->column(0)->chunk(0),

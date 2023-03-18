@@ -84,28 +84,37 @@ struct BucketCounter final : cp::KernelState {
 
   uint64_t                            hash_seed;
   SkewBucketer                        bucketer;
-  arrow::TypedBufferBuilder<uint32_t> counts;
+  arrow::TypedBufferBuilder<uint16_t> counts;
 };
 
 Result<std::unique_ptr<cp::KernelState>>
 BucketCounter::Init(cp::KernelContext* ctx, const cp::KernelInitArgs& args) {
   auto options = checked_cast<const BucketerOptions*>(args.options);
   auto state = std::make_unique<BucketCounter>(options->num_buckets, ctx->memory_pool());
-  ARROW_RETURN_NOT_OK(state->counts.Reserve(options->num_buckets));
-  state->counts.UnsafeAppend(options->num_buckets, 0);
   state->hash_seed = options->hash_seed;
-  VLOG(1) << "Init " << state.get();
+  VLOG(1) << "Make job " << state.get();
   return state;
 }
 
 Status BucketCounter::Consume(cp::KernelContext* ctx, const cp::ExecSpan& batch) {
   auto& state = checked_cast<BucketCounter&>(*ctx->state());
-  const uint64_t* pn = batch[0].array.GetValues<uint64_t>(1);
   const SkewBucketer& bucketer = state.bucketer;
-  uint32_t* counts = state.counts.mutable_data();
+
+  /* Arrow allocates state for each thread including IO ones.
+   * To avoid wasting large chunks of memory we have to allocate it lazily. */
+  if (ARROW_PREDICT_FALSE(state.counts.length() == 0)) {
+    ARROW_RETURN_NOT_OK(state.counts.Append(bucketer.num_buckets(), 0));
+    VLOG(1) << "Init job " << &state << ", bytes allocated: "
+            << state.counts.bytes_builder()->capacity();
+  }
+
+  const uint64_t* pn = batch[0].array.GetValues<uint64_t>(1);
+  uint16_t* counts = state.counts.mutable_data();
   uint64_t seed = state.hash_seed;
 
-  VLOG(1) << &state << ": consume batch " << pn[0] << " to " << pn[batch.length-1];
+  VLOG(2) << "Job " << &state << ": "
+          << pn[0] << " to " << pn[batch.length-1]
+          << "of length " << batch.length;
 
   // XXX: Analyze vectorizer assembly and decide whether to split hashing
   for (uint32_t i = 0; i < batch.length; ++i) {
@@ -121,16 +130,25 @@ Status BucketCounter::Merge(cp::KernelContext*, cp::KernelState&& other_state,
                             cp::KernelState* kernel_state)
 {
   auto& state = checked_cast<BucketCounter&>(*kernel_state);
-  auto& other = checked_cast<const BucketCounter&>(other_state);
+  auto& other = checked_cast<BucketCounter&>(other_state);
   uint32_t num_buckets = state.bucketer.num_buckets();
-  uint32_t* counts = state.counts.mutable_data();
-  const uint32_t* increment = other.counts.data();
+  uint16_t* counts = state.counts.mutable_data();
+  const uint16_t* increment = other.counts.data();
 
-  LOG(INFO) << "Merge " << kernel_state << ' ' << &other_state;
+  if (other.counts.length() == 0)
+    return Status::OK();
+
+  if (state.counts.length() == 0) {
+    state.counts = std::move(other.counts);
+    return Status::OK();
+  }
+
+  VLOG(1) << "Merge job " << kernel_state << ' ' << &other_state;
   DCHECK_EQ(num_buckets, other.bucketer.num_buckets());
 
   for (uint32_t i = 0; i < num_buckets; ++i)
     counts[i] += increment[i];
+  other.counts.Reset();
 
   return Status::OK();
 }
@@ -142,14 +160,14 @@ Status BucketCounter::Finalize(cp::KernelContext* ctx, arrow::Datum* out) {
   std::shared_ptr<arrow::Buffer> counts_data;
 
   ARROW_RETURN_NOT_OK(state.counts.Finish(&counts_data));
-  *out = arrow::ArrayData::Make(arrow::uint32(), state.bucketer.num_buckets(),
+  *out = arrow::ArrayData::Make(arrow::uint16(), state.bucketer.num_buckets(),
                                 {NULLPTR, std::move(counts_data)},
                                 /*null_count=*/0);
   return Status::OK();
 }
 
 void AddBucketCounterKernels(cp::ScalarAggregateFunction* func) {
-  auto sig = cp::KernelSignature::Make({arrow::uint64()}, arrow::uint32());
+  auto sig = cp::KernelSignature::Make({arrow::uint64()}, arrow::uint16());
   cp::ScalarAggregateKernel kernel(std::move(sig),
                                    BucketCounter::Init,
                                    BucketCounter::Consume,
