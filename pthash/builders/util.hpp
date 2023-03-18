@@ -128,6 +128,9 @@ private:
 };
 
 template <typename Pairs, typename Merger>
+// Pairs == ordered vector<bucket_payload_pair>
+// bucket_payload_pair == bucket_id, hash2
+// Merger == buckets_t
 void merge_single_block(Pairs const& pairs, Merger& merger, bool verbose) {
     progress_logger logger(pairs.size(), " == merged ", " pairs", verbose);
 

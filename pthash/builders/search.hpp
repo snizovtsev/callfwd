@@ -127,8 +127,9 @@ void search_sequential(uint64_t num_keys, uint64_t num_buckets, uint64_t num_non
     if (config.verbose_output) log.init();
 
     uint64_t processed_buckets = 0;
+    // iterate by bucket size (descending)
     for (; processed_buckets < num_non_empty_buckets; ++processed_buckets, ++buckets) {
-        bucket_t const& bucket = *buckets;
+        bucket_t const& bucket = *buckets; // a set of hashes
         assert(bucket.size() > 0);
 
         for (uint64_t pilot = 0; true; ++pilot) {
@@ -138,6 +139,7 @@ void search_sequential(uint64_t num_keys, uint64_t num_buckets, uint64_t num_non
 
             positions.clear();
 
+            // iterate all hashes of this
             auto bucket_begin = bucket.begin(), bucket_end = bucket.end();
             for (; bucket_begin != bucket_end; ++bucket_begin) {
                 uint64_t hash = *bucket_begin;

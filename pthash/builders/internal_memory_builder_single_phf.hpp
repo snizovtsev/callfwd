@@ -78,7 +78,7 @@ struct internal_memory_builder_single_phf {
             }
 
             start = clock_type::now();
-            merge(pairs_blocks, buckets, config.verbose_output);
+            merge(pairs_blocks, buckets, config.verbose_output); // -> NEW ATTEMPT (hash collision)
             elapsed = seconds(clock_type::now() - start);
             if (config.verbose_output) {
                 std::cout << " == merge+check took: " << elapsed << " seconds" << std::endl;
@@ -253,7 +253,7 @@ private:
     private:
         std::vector<std::vector<uint64_t>>::const_iterator m_buffers_it;
         bucket_size_type m_bucket_size;
-        bucket_t m_bucket;
+        bucket_t m_bucket; // just an integer span
 
         void skip_empty_buckets() {
             while (m_bucket_size != 0 and m_buffers_it->empty()) {
@@ -264,6 +264,7 @@ private:
         }
     };
 
+    // aka "Merger"
     struct buckets_t {
         buckets_t() : m_buffers(MAX_BUCKET_SIZE), m_num_buckets(0) {}
 
@@ -271,6 +272,7 @@ private:
         void add(bucket_id_type bucket_id, bucket_size_type bucket_size, HashIterator hashes) {
             assert(bucket_size > 0);
             uint64_t i = bucket_size - 1;
+            m_buffers[i].reserve(m_buffers[i].size() + bucket_size + 1);
             m_buffers[i].push_back(bucket_id);
             for (uint64_t k = 0; k != bucket_size; ++k, ++hashes)
                 m_buffers[i].push_back(*hashes);
