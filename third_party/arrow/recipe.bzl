@@ -47,6 +47,7 @@ cmake_configure_file(
 glob_exclude_files = [
     "**/benchmark_*",
     "cpp/src/arrow/adapters/**",
+    "cpp/src/arrow/compute/exec/test_nodes.*",
     "cpp/src/arrow/dataset/file_orc*",
     "cpp/src/arrow/dataset/file_parquet*",
     "cpp/src/arrow/engine/substrait/**",
@@ -67,6 +68,7 @@ glob_hdrs = glob([
     "cpp/src/arrow/**/*.h",
     "cpp/thirdparty/**/*.h",
     "cpp/src/arrow/vendored/pcg/*.hpp",
+    "cpp/src/arrow/vendored/uriparser/*.h",
 ], exclude = glob_exclude_files + [
     "**/*_test.h",
     "**/*test_util.h",
@@ -75,6 +77,7 @@ glob_hdrs = glob([
 glob_srcs = glob([
     "cpp/src/arrow/**/*.cc",
     "cpp/src/arrow/vendored/datetime/*.cpp",
+    "cpp/src/arrow/vendored/uriparser/*.c",
     "cpp/src/generated/*_generated.h",
 ], exclude = glob_exclude_files + [
     "**/*_test.cc",
