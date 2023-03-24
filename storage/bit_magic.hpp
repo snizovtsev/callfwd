@@ -55,6 +55,10 @@ static inline uint64_t murmur3_64(uint64_t val, uint64_t seed) {
 
 // fastmod library
 // credits to Daniel Lemire: https://github.com/lemire/fastmod
+static inline uint64_t fastmod_computeM_u32(uint32_t d) {
+    return UINT64_C(0xFFFFFFFFFFFFFFFF) / d + 1;
+}
+
 static inline __uint128_t fastmod_computeM_u64(uint64_t d) {
     // what follows is just ((__uint128_t)0 - 1) / d) + 1 spelled out
     __uint128_t M = UINT64_C(0xFFFFFFFFFFFFFFFF);
@@ -65,6 +69,10 @@ static inline __uint128_t fastmod_computeM_u64(uint64_t d) {
     return M;
 }
 
+static inline uint64_t mul128_u32(uint64_t lowbits, uint32_t d) {
+    return ((__uint128_t)lowbits * d) >> 64;
+}
+
 // This is for the 64-bit functions.
 static inline uint64_t mul128_u64(__uint128_t lowbits, uint64_t d) {
     __uint128_t bottom_half = (lowbits & UINT64_C(0xFFFFFFFFFFFFFFFF)) * d;  // Won't overflow
@@ -73,6 +81,10 @@ static inline uint64_t mul128_u64(__uint128_t lowbits, uint64_t d) {
     __uint128_t both_halves = bottom_half + top_half;  // Both halves are already shifted down by 64
     both_halves >>= 64;                                // Get top half of both_halves
     return (uint64_t)both_halves;
+}
+
+static inline uint32_t fastdiv_u32(uint32_t a, uint64_t M) {
+    return (uint32_t)(mul128_u32(M, a));
 }
 
 static inline uint64_t fastmod_u64(uint64_t a, __uint128_t M, uint64_t d) {

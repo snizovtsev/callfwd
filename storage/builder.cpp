@@ -7,23 +7,30 @@
 #include <arrow/api.h>
 #include <arrow/io/api.h>
 #include <arrow/ipc/api.h>
+#include <arrow/dataset/api.h>
+#include <arrow/dataset/plan.h>
+#include <arrow/filesystem/api.h>
 #include <arrow/compute/api.h>
 #include <arrow/compute/exec/query_context.h>
-
 #include <arrow/ipc/feather.h>
-#include <arrow/scalar.h>
-#include <arrow/type_fwd.h>
+#include <arrow/util/unreachable.h>
+#include <arrow/util/thread_pool.h>
 #include <arrow/util/logging.h>
 #include <folly/experimental/NestedCommandLineApp.h>
 #include <folly/GroupVarint.h>
+#include <folly/Conv.h>
 
+#include <functional>
+#include <iostream>
 #include <map>
 #include <memory>
-#include <iostream>
-#include <functional>
+#include <mutex>
+#include <cstdint>
 #include <cstdlib>
 
 namespace po = ::boost::program_options;
+namespace cp = arrow::compute;
+namespace ds = arrow::dataset;
 
 enum {
   DATA_VERSION       = 1, /* TODO */
@@ -361,55 +368,68 @@ struct BuildPTHashOpts {
   float tweak_alpha;
 };
 
-/* Declare the PTHash function. */
-typedef pthash::single_phf<
-  pthash::hash_128,        // base hasher
-  pthash::dictionary_dictionary,  // encoder type
-  false                   // minimal
-  > pthash128_t;
+class CountingFileWriter final : public ds::FileWriter {
+ public:
+  explicit CountingFileWriter(std::shared_ptr<ds::FileWriter> wrapee,
+                              std::shared_ptr<arrow::KeyValueMetadata> metadata)
+      : FileWriter(wrapee->schema(), wrapee->options(), NULLPTR, wrapee->destination())
+      , wrapee_(std::move(wrapee))
+      , metadata_(std::move(metadata))
+  {}
 
-namespace cp = arrow::compute;
+  arrow::Status Write(const std::shared_ptr<arrow::RecordBatch>& batch) override {
+    rows_written_ += batch->num_rows();
+    return wrapee_->Write(batch);
+  }
 
-void BuildPTHash(const po::variables_map& options,
-                 const std::vector<std::string> &args)
+  arrow::Future<> FinishInternal() override {
+    arrow::Unreachable();
+  }
+
+  arrow::Future<> Finish() override {
+    metadata_->Append("num_rows", std::to_string(rows_written_));
+    return wrapee_->Finish();
+  }
+
+ private:
+  int64_t rows_written_ = 0;
+  std::shared_ptr<ds::FileWriter> wrapee_;
+  std::shared_ptr<arrow::KeyValueMetadata> metadata_;
+};
+
+class CountingIpcFileFormat : public ds::IpcFileFormat {
+ public:
+  arrow::Result<std::shared_ptr<ds::FileWriter>> MakeWriter(
+      std::shared_ptr<arrow::io::OutputStream> destination,
+      std::shared_ptr<arrow::Schema> schema,
+      std::shared_ptr<ds::FileWriteOptions> options,
+      arrow::fs::FileLocator destination_locator) const override
+  {
+    auto cloned_options = std::dynamic_pointer_cast<ds::IpcFileWriteOptions>(options);
+    std::shared_ptr<arrow::KeyValueMetadata> cloned_metadata;
+
+    cloned_options = std::make_shared<ds::IpcFileWriteOptions>(*cloned_options);
+    if (cloned_options->metadata)
+      cloned_metadata = cloned_options->metadata->Copy();
+    else
+      cloned_metadata = arrow::KeyValueMetadata::Make({}, {});
+    cloned_options->metadata = cloned_metadata;
+
+    ARROW_ASSIGN_OR_RAISE(auto wrapee, ds::IpcFileFormat
+        ::MakeWriter(std::move(destination), std::move(schema),
+                     std::move(cloned_options), std::move(destination_locator)));
+    return std::make_shared<CountingFileWriter>(std::move(wrapee),
+                                                std::move(cloned_metadata));
+  }
+};
+
+void BuildPTHash2(const po::variables_map& options,
+                  const std::vector<std::string> &args)
 {
   RegisterCustomFunctions(cp::GetFunctionRegistry());
+  arrow::dataset::internal::Initialize();
+
   CHECK_EQ(args.size(), 1u);
-
-  /* Set up a build configuration. */
-  pthash::build_configuration config;
-  config.c = options[OPT_PTHASH_C].as<float>();
-  config.alpha = options[OPT_PTHASH_ALPHA].as<float>();
-  config.minimal_output = pthash128_t::minimal;  // mphf
-  config.verbose_output = true;
-  config.num_threads = 8;
-  // config.num_partitions = 8;
-
-  auto istream = arrow::io::MemoryMappedFile
-    ::Open(args[0], arrow::io::FileMode::READ)
-    .ValueOrDie();
-
-  auto reader = arrow::ipc::RecordBatchFileReader
-      ::Open(istream, arrow::ipc::IpcReadOptions{
-          .included_fields = {0},
-        })
-      .ValueOrDie();
-  auto async_batch_gen = reader->GetRecordBatchGenerator()
-    .ValueOrDie();
-
-  auto open_batch_gen = [=]() {
-    return arrow::MakeFunctionIterator([=]() {
-      return async_batch_gen().result();
-    });
-  };
-
-  uint64_t num_rows = (reader->num_record_batches() - 1) * LRN_ROWS_PER_CHUNK
-    + reader->ReadRecordBatch(reader->num_record_batches() - 1).ValueOrDie()->num_rows();
-  LOG(INFO) << "#rows: " << num_rows;
-  LOG(INFO) << "#batches " << reader->num_record_batches();
-
-  config.num_buckets =
-    std::ceil((config.c * num_rows) / std::log2(num_rows));
 
   // construct an ExecPlan first to hold your nodes
   LOG(INFO) << "Make plan";
@@ -417,25 +437,70 @@ void BuildPTHash(const po::variables_map& options,
   auto plan = cp::ExecPlan::Make(exec_context)
     .ValueOrDie();
 
-  /* Plan variables */
-  std::shared_ptr<arrow::Table> buckets;
-  auto bucketer_opts = std::make_shared<BucketerOptions>(config.num_buckets);
+  LOG(INFO) << "Open table";
+
+  auto istream = arrow::io::MemoryMappedFile
+    ::Open(args[0], arrow::io::FileMode::READ)
+    .ValueOrDie();
+
+  auto reader = arrow::ipc::RecordBatchFileReader
+      ::Open(istream, arrow::ipc::IpcReadOptions{})
+      .ValueOrDie();
+
+  auto async_batch_gen = reader->GetRecordBatchGenerator(
+    /*coalesce = */ false,
+    *plan->query_context()->io_context())
+    .ValueOrDie();
+
+  auto to_exec_batch = [=]() {
+    return async_batch_gen()
+      .Then([](const std::shared_ptr<arrow::RecordBatch> &batch)
+        -> std::optional<cp::ExecBatch>
+      {
+        if (batch == NULLPTR)
+          return std::nullopt;
+        else
+          return std::optional<cp::ExecBatch>(cp::ExecBatch(*batch));
+      });
+  };
+
+  uint64_t num_rows = (reader->num_record_batches() - 1) * LRN_ROWS_PER_CHUNK
+    + reader->ReadRecordBatch(reader->num_record_batches() - 1).ValueOrDie()->num_rows();
+  LOG(INFO) << "#rows: " << num_rows;
+  LOG(INFO) << "#batches " << reader->num_record_batches();
+
+  uint32_t num_partitions = 32;
+  float config_c = options[OPT_PTHASH_C].as<float>();
+  uint32_t num_buckets =
+    std::ceil((config_c * num_rows) / std::log2(num_rows));
+
+  ds::FileSystemDatasetWriteOptions write_options;
+  write_options.existing_data_behavior = ds::ExistingDataBehavior::kOverwriteOrIgnore;
+  write_options.filesystem = std::make_shared<arrow::fs::LocalFileSystem>();
+  write_options.base_dir = "parts/";
+  write_options.file_write_options = std::make_shared<CountingIpcFileFormat>()
+      ->DefaultWriteOptions();
+  write_options.partitioning = std::make_shared<ds::FilenamePartitioning>(
+    arrow::schema({arrow::field("part", arrow::uint32())}));
+  write_options.basename_template = "pn.{i}.arrow";
+  write_options.max_partitions = num_partitions;
+  //write_options.max_rows_per_group = LRN_ROWS_PER_CHUNK;
 
   LOG(INFO) << "Build plan";
   cp::Declaration::Sequence({
-    {"record_batch_source", cp::RecordBatchSourceNodeOptions{
-        reader->schema(), open_batch_gen
-    }},
+    {"source", cp::SourceNodeOptions{reader->schema(), to_exec_batch}},
     {"project", cp::ProjectNodeOptions{
-      {cp::call("shift_right", {
-          cp::field_ref("pn_bits"),
-          cp::literal(UINT64_C(30))})},
-      {"pn"}
+      {cp::call("x_pthash_partitioner", {
+          cp::call("shift_right", {
+            cp::field_ref("pn_bits"),
+            cp::literal(UINT64_C(30))
+          })
+        }, std::make_shared<BucketerOptions>(num_buckets, num_partitions)),
+       cp::field_ref("pn_bits"),
+       cp::field_ref("rn_bits")},
+      {"part", "pn_bits", "rn_bits"}
     }},
-    {"aggregate", cp::AggregateNodeOptions{
-      {{"x_bucket_counter", bucketer_opts, "pn", "size"}},
-    }},
-    {"table_sink", cp::TableSinkNodeOptions{&buckets}}
+    {"write", ds::WriteNodeOptions{write_options}},
   }).AddToPlan(plan.get())
     .ValueOrDie();
 
@@ -443,63 +508,87 @@ void BuildPTHash(const po::variables_map& options,
   ARROW_CHECK_OK(plan->Validate());
 
   LOG(INFO) << "Running...";
-  ARROW_CHECK_OK(plan->StartProducing());
+  //ARROW_CHECK_OK(plan->StartProducing());
+  plan->StartProducing();
   plan->finished().result()
     .ValueOrDie();
 
   LOG(INFO) << "Finished plan";
-  CHECK_EQ(buckets->column(0)->num_chunks(), 1);
-  LOG(INFO) << "#buckets " << buckets->column(0)->chunk(0)->length();
+}
 
-  LOG(INFO) << "Sorting buckets by size";
-  auto bucket_order = cp::SortIndices(buckets, cp::SortOptions{
-      {cp::SortKey{"size", cp::SortOrder::Descending}}
-    }, exec_context)
+void BuildPTHash(const po::variables_map& options,
+                 const std::vector<std::string> &args)
+{
+  /* Set up a build configuration. */
+  pthash::build_configuration config;
+  config.c = options[OPT_PTHASH_C].as<float>();
+  config.alpha = options[OPT_PTHASH_ALPHA].as<float>();
+  config.verbose_output = true;
+  config.num_threads = 8;
+  // config.num_partitions = 8;
+
+  arrow::fs::FileSelector selector;
+  selector.base_dir = "parts/";
+
+  std::shared_ptr<ds::DatasetFactory> factory = ds::FileSystemDatasetFactory
+    ::Make(std::make_shared<arrow::fs::LocalFileSystem>(),
+           std::move(selector),
+           std::make_shared<ds::IpcFileFormat>(),
+           ds::FileSystemFactoryOptions{})
+    .ValueOrDie();
+  std::shared_ptr<ds::Dataset> dataset = factory->Finish()
     .ValueOrDie();
 
-  uint64_t top_index = std::static_pointer_cast<arrow::UInt64Array>(bucket_order)
-    ->Value(0);
-  uint64_t top_count = std::static_pointer_cast<arrow::UInt16Array>(buckets->column(0)->chunk(0))
-    ->Value(top_index);
-  LOG(INFO) << "Max bucket size: " << top_count;
+  // XXX: to metadata
+  int64_t local_table_size = 0, partitions = 0, all_rows = 0;
 
-  buckets = arrow::Table::Make(
-    arrow::schema({
-      arrow::field("size", arrow::uint16()),
-      arrow::field("order", arrow::uint64()),
-    }),
-    { buckets->column(0)->chunk(0),
-      std::move(bucket_order) }
-  );
+  // Print out the fragments
+  for (const auto& maybe_fragment : *dataset->GetFragments()) {
+    std::shared_ptr<ds::Fragment> fragment = *maybe_fragment;
 
-  std::cout << "Bucket table:" << std::endl
-            << buckets->ToString() << std::endl;
-  ARROW_CHECK_OK(buckets->ValidateFull());
+    auto fragment_in = arrow::io::ReadableFile::Open(fragment->ToString())
+      .ValueOrDie();
+    auto fragment_reader = arrow::ipc::RecordBatchFileReader
+      ::Open(fragment_in, arrow::ipc::IpcReadOptions{})
+      .ValueOrDie();
+    std::shared_ptr<const arrow::KeyValueMetadata> metadata
+        = fragment_reader->metadata();
 
-  return;
+    int64_t nrows = folly::to<int64_t>(metadata->Get("num_rows").ValueOr("-1"));
+    all_rows += nrows;
+    local_table_size = std::max(nrows, local_table_size);
 
-  std::string output_path = options[OPT_PTHASH_OUTPUT]
-      .as<std::string>();
+    LOG(INFO) << "Found fragment: " << fragment->ToString()
+              << " rows: " << nrows;
+    ++partitions;
+  }
 
-  pthash128_t f;
+  LOG(INFO) << "max fragment:\t" << local_table_size;
+  LOG(INFO) << "all_rows:\t\t" << all_rows;
+  LOG(INFO) << "adjusted:\t\t" << local_table_size * partitions;
+  LOG(INFO) << "optimal T:\t\t" << (uint64_t)(all_rows / config.alpha);
+  LOG(INFO) << "partitioned:\t\t" << (uint64_t)(local_table_size * partitions / config.alpha);
 
-  /* Build the function in internal memory. */
-  LOG(INFO) << "building the function...";
+  local_table_size = local_table_size / config.alpha;
 
-  //pthash::internal_memory_builder_single_phf<pthash::hash_128> builder;
-  pthash::internal_memory_builder_single_phf<pthash::hash_128> builder;
-  //builder.build_from_keys(pn_keys.begin(), pn_keys.size(), config);
-  LOG(INFO) << "done";
-  f.build(builder, config);
+  auto executor = arrow::internal::GetCpuThreadPool();
+  for (int i = 0; i < 30; ++i) {
+    ARROW_CHECK_OK(executor->Spawn([=]() {
+      LOG(INFO) << i << ": sleep 3";
+      sleep(3);
+      LOG(INFO) << i << ": exit";
+    }));
+  }
 
-  /* Compute and print the number of bits spent per key. */
-  double bits_per_key = static_cast<double>(f.num_bits()) / f.num_keys();
-  LOG(INFO) << "DONE! function uses " << bits_per_key << " [bits/key]";
-
-  /* Serialize the data structure to a file. */
-  LOG(INFO) << "serializing the function to disk...";
-  essentials::save(f, output_path.c_str());
+  executor->WaitForIdle();
 }
+
+/* Declare the PTHash function. */
+typedef pthash::single_phf<
+  pthash::hash_128,        // base hasher
+  pthash::dictionary_dictionary,  // encoder type
+  false                   // minimal
+  > pthash128_t;
 
 void PermuteHash(const po::variables_map& options,
                  const std::vector<std::string> &args)
@@ -519,7 +608,6 @@ void PermuteHash(const po::variables_map& options,
     ::Open(istream, arrow::ipc::IpcReadOptions{})
     .ValueOrDie();
 
-  // TODO: new table may have more chunks if pthash isn't minimal
   auto schema = table_reader->schema();
   int num_batches = (f.table_size() + LRN_ROWS_PER_CHUNK - 1) / LRN_ROWS_PER_CHUNK;
   CHECK_GE(num_batches, table_reader->num_record_batches());
@@ -644,8 +732,8 @@ void Query(const po::variables_map& options,
 
     auto lrn = lrn_reader->ReadRecordBatch(chunk)
       .ValueOrDie();
-    auto pn_column = std::static_pointer_cast<arrow::UInt64Array>(lrn->column(0));
-    auto rn_column = std::static_pointer_cast<arrow::UInt64Array>(lrn->column(1));
+    auto pn_column = std::dynamic_pointer_cast<arrow::UInt64Array>(lrn->column(0));
+    auto rn_column = std::dynamic_pointer_cast<arrow::UInt64Array>(lrn->column(1));
 
     uint64_t pn_bits = pn_column->Value(pos);
     uint64_t rn_bits = rn_column->Value(pos);
@@ -756,16 +844,22 @@ int main(int argc, const char* argv[]) {
        po::value<std::string>()->required(),
        "Arrow RN table output path. Required.");
 
+  app.addCommand(
+      "pthash-partition", "",
+      "",
+      "",
+      BuildPTHash2);
+
   auto& pthash_pn_cmd = app.addCommand(
-      "pthash-pn", "arrow_table_path",
+      "pthash-build", "arrow_table_path",
       "Build PTHash index for PN dataset",
       "",
       BuildPTHash);
 
   pthash_pn_cmd.add_options()
-      (OPT_PTHASH_OUTPUT ",O",
-       po::value<std::string>()->required(),
-       "Arrow table output path. Required.")
+      // (OPT_PTHASH_OUTPUT ",O",
+      //  po::value<std::string>()->required(),
+      //  "Arrow table output path. Required.")
       (OPT_PTHASH_C ",c",
        po::value<float>()->default_value(6.0),
        "Bucket density coefficient")
