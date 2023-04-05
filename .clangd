@@ -1,0 +1,4 @@
+Index:
+  StandardLibrary: No
+CompileFlags:
+  CompilationDatabase: bazel-bin/tools
