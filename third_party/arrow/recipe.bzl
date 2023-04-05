@@ -19,21 +19,31 @@ arrow_defs = [
     "ARROW_GIT_ID=unknown",
     "ARROW_GIT_DESCRIPTION=unknown",
     "ARROW_PACKAGE_KIND=unknown",
+
+    "ARROW_COMPUTE",
+    "ARROW_CSV",
+    "ARROW_DATASET",
+    "ARROW_FILESYSTEM",
+    "ARROW_IPC",
+    "ARROW_JSON",
     "ARROW_USE_NATIVE_INT128",
-    #"ARROW_S3",
 ]
 
 arrow_undefs = [
     "ARROW_FLIGHT",
     "ARROW_FLIGHT_SQL",
+    "ARROW_JEMALLOC",
+    "ARROW_JEMALLOC_VENDORED",
     "ARROW_CUDA",
     "ARROW_ORC",
     "ARROW_PARQUET",
     "ARROW_SUBSTRAIT",
     "ARROW_GCS",
+    "ARROW_S3",
     "ARROW_WITH_MUSL",
     "ARROW_WITH_OPENTELEMETRY",
     "ARROW_WITH_UCX",
+    "GRPCPP_PP_INCLUDE",
 ]
 
 cmake_configure_file(
@@ -42,6 +52,7 @@ cmake_configure_file(
     out = "cpp/src/arrow/util/config.h",
     defines = arrow_defs,
     undefines = arrow_undefs,
+    strict = True,
 )
 
 glob_exclude_files = [
@@ -99,14 +110,19 @@ cc_library(
         "cpp/thirdparty/flatbuffers/include",
         "cpp/thirdparty/hadoop/include",
     ],
-    copts = ["-march=skylake-avx512"],
+    copts = [
+        "-march=skylake-avx512",
+    ],
     local_defines = [
         "ARROW_HAVE_AVX512",
         "ARROW_HAVE_AVX2",
         "ARROW_HAVE_BMI2",
         "ARROW_HAVE_SSE4_2",
+    ],
+    defines = [
+        "ARROW_EXTRA_ERROR_CONTEXT",
+        "ARROW_NO_DEPRECATED_API",
         "ARROW_USE_GLOG",
-        "ARROW_USE_NATIVE_INT128",
     ],
     hdrs = glob_hdrs + ["cpp/src/arrow/util/config.h"],
     srcs = glob_srcs,

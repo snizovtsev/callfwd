@@ -79,8 +79,9 @@ git_repository(
     name = "com_github_apache_arrow",
     remote = "https://github.com/apache/arrow",
     #commit = "f10f5cfd1376fb0e602334588b3f3624d41dee7d", # v11.0.0
+    #shallow_since = "1674031127 +0100",
     commit = "d422137d8a4d7578bdf9d5b0fb51b286a8bc92c2", # v12.0.0.dev
-    shallow_since = "1674031127 +0100",
+    shallow_since = "1675089126 +0100",
     build_file = "//third_party/arrow:recipe.bzl",
 )
 
