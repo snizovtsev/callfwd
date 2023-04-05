@@ -60,8 +60,11 @@ git_repository(
 git_repository(
     name = "com_github_google_glog",
     remote = "https://github.com/google/glog",
-    commit = "b33e3bad4c46c8a6345525fd822af355e5ef9446", # v0.6.0
-    shallow_since = "1649109807 +0200",
+    # https://github.com/google/glog/issues/847
+    # commit = "b33e3bad4c46c8a6345525fd822af355e5ef9446", # v0.6.0
+    # shallow_since = "1649109807 +0200",
+    commit = "674283420118bb919f83ceb3d9dee31ef43ff3aa",
+    shallow_since = "1677583609 +0100",
 )
 
 git_repository(
