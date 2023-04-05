@@ -1,7 +1,5 @@
-#include "csv_reader.hpp"
-
 #include "compute_kernels.hpp"
-#include "glog/logging.h"
+#include "pn_ordered_join.hpp"
 #include "pthash/pthash.hpp"
 
 #include <arrow/api.h>
@@ -15,6 +13,7 @@
 #include <arrow/ipc/feather.h>
 #include <arrow/util/unreachable.h>
 #include <arrow/util/thread_pool.h>
+#include <glog/logging.h>
 #include <arrow/util/logging.h>
 #include <folly/experimental/NestedCommandLineApp.h>
 #include <folly/GroupVarint.h>
@@ -31,328 +30,6 @@
 namespace po = ::boost::program_options;
 namespace cp = arrow::compute;
 namespace ds = arrow::dataset;
-
-enum {
-  DATA_VERSION       = 1, /* TODO */
-  LRN_ROWS_PER_CHUNK = (256 / 16) * (1 << 10) - 12, /* 256 kb block */
-  YM_ROWS_PER_CHUNK  = 256,  /*  */
-  RN_ROWS_PER_CHUNK  = 128,  /*  */
-};
-
-struct MapPnOpts {
-  explicit MapPnOpts() noexcept = default;
-  explicit MapPnOpts(const po::variables_map& options,
-                     const std::vector<std::string> &args);
-
-  std::vector<std::string> lrn_data_paths;
-# define OPT_MAP_PN_DNC     "dnc"
-  std::string dnc_data_path;
-# define OPT_MAP_PN_DNO     "dno"
-  std::string dno_data_path;
-# define OPT_MAP_PN_YOUMAIL "youmail"
-  std::string youmail_data_path;
-# define OPT_MAP_PN_OUTPUT  "output"
-  std::string output_path;
-# define OPT_MAP_PN_YM_OUTPUT "ym-output"
-  std::string ym_output_path;
-# define OPT_MAP_PN_RN_OUTPUT "rn-output"
-  std::string rn_output_path;
-};
-
-MapPnOpts::MapPnOpts(const po::variables_map& options,
-                     const std::vector<std::string> &args)
-    : lrn_data_paths(args)
-    , dnc_data_path(options[OPT_MAP_PN_DNC].as<std::string>())
-    , dno_data_path(options[OPT_MAP_PN_DNO].as<std::string>())
-    , youmail_data_path(options[OPT_MAP_PN_YOUMAIL].as<std::string>())
-    , output_path(options[OPT_MAP_PN_OUTPUT].as<std::string>())
-    , ym_output_path(options[OPT_MAP_PN_YM_OUTPUT].as<std::string>())
-    , rn_output_path(options[OPT_MAP_PN_RN_OUTPUT].as<std::string>())
-{
-  if (lrn_data_paths.empty())
-    throw folly::ProgramExit(1, "At least 1 positional argument required.");
-}
-
-class MapPnCommand {
- public:
-  explicit MapPnCommand();
-  arrow::Status Main(const MapPnOpts &opts);
-
- private:
-  using TableBuilderPtr =
-      std::unique_ptr<arrow::RecordBatchBuilder>;
-  using OutputStreamPtr =
-      std::shared_ptr<arrow::io::FileOutputStream>;
-  using RecordBatchWriterPtr =
-      std::shared_ptr<arrow::ipc::RecordBatchWriter>;
-
-  PnMultiReader csv_;
-  PnRecordJoiner lrn_joiner_;
-  TableBuilderPtr lrn_builder_;
-  TableBuilderPtr ym_builder_;
-  TableBuilderPtr rn_builder_;
-  OutputStreamPtr ostream_;
-  OutputStreamPtr ym_ostream_;
-  OutputStreamPtr rn_ostream_;
-  RecordBatchWriterPtr table_writer_;
-  RecordBatchWriterPtr ym_writer_;
-  RecordBatchWriterPtr rn_writer_;
-};
-
-/*
-   PN column (UInt64)
-  ┌─────────────┬────────────┬─────────┬─────┬─────┬─────┐
-  │  63 ... 30  │  29 ... 6  │ 5 ... 3 │  2  │  1  │  0  │
-  ├─────────────┼────────────┼─────────┼─────┴─────┴─────┤
-  │   34 bits   │  24 bits   │ 3 bits  │      Flags      │
-  ├─────────────┼────────────┼─────────┼─────┬─────┬─────┤
-  │ 10-digit PN │ YouMail id │   DNO   │ DNO │ DNC │ LRN │
-  └─────────────┴────────────┴─────────┴─────┴─────┴─────┘
-
-   RN column (UInt64)
-  ┌─────────────┬────────────┐
-  │  63 ... 30  │  29 ... 6  │
-  ├─────────────┼────────────┤
-  │   34 bits   │  30 bits   │
-  ├─────────────┼────────────┤
-  │ 10-digit RN │  RN seqnum │
-  └─────────────┴────────────┘
- */
-
-#define LRN_BITS_MASK(field)                \
-  ((1ull << LRN_BITS_##field##_WIDTH) - 1)  \
-  << LRN_BITS_##field##_SHIFT
-
-enum {
-  LRN_BITS_LRN_FLAG  = 1ull << 0,
-  LRN_BITS_DNC_FLAG  = 1ull << 1,
-  LRN_BITS_DNO_FLAG  = 1ull << 2,
-  LRN_BITS_FLAG_MASK = (1ull << 3) - 1,
-  LRN_BITS_DNO_SHIFT = 3,
-  LRN_BITS_DNO_WIDTH = 3,
-  LRN_BITS_DNO_MASK  = LRN_BITS_MASK(DNO),
-  LRN_BITS_YM_SHIFT  = 6,
-  LRN_BITS_YM_WIDTH  = 24,
-  LRN_BITS_YM_MASK   = LRN_BITS_MASK(YM),
-  LRN_BITS_PN_SHIFT  = 30,
-  LRN_BITS_PN_WIDTH  = 34,
-  LRN_BITS_PN_MASK   = LRN_BITS_MASK(PN),
-};
-
-MapPnCommand::MapPnCommand()
-    : lrn_builder_{
-        arrow::RecordBatchBuilder::Make(arrow::schema({
-          arrow::field("pn_bits", arrow::uint64()),
-          arrow::field("rn_bits", arrow::uint64()),
-        }), arrow::default_memory_pool(), LRN_ROWS_PER_CHUNK)
-        .ValueOrDie()
-      }
-    , ym_builder_{
-        arrow::RecordBatchBuilder::Make(arrow::schema({
-          arrow::field("spam_score", arrow::float32()),
-          arrow::field("fraud_prob", arrow::float32()),
-          arrow::field("unlawful_prob", arrow::float32()),
-          arrow::field("tcpa_fraud_prob", arrow::float32()),
-        }), arrow::default_memory_pool(), YM_ROWS_PER_CHUNK)
-        .ValueOrDie()
-      }
-    , rn_builder_{
-        arrow::RecordBatchBuilder::Make(arrow::schema({
-          arrow::field("rn", arrow::uint64()),
-          arrow::field("pn_set", arrow::binary()),
-        }), arrow::default_memory_pool(), RN_ROWS_PER_CHUNK)
-        .ValueOrDie()
-      }
-{}
-
-struct StringAppender {
-  std::string data;
-  void operator()(folly::StringPiece sp) {
-    data.append(sp.data(), sp.size());
-  }
-};
-
-class RnEncoder {
- public:
-  void Add(uint64_t val) {
-    CHECK_GT(val, prev_);
-    if (!prev_)
-      enc_.add(val);
-    else
-      enc_.add(val - prev_);
-    prev_ = val;
-  }
-
-  const std::string& Finish() {
-    enc_.finish();
-    return enc_.output().data;
-  }
-
- private:
-  using GroupVarintEncoder = folly::GroupVarintEncoder<uint64_t, StringAppender>;
-  GroupVarintEncoder enc_{StringAppender{}};
-  uint64_t prev_ = 0;
-};
-
-arrow::Status MapPnCommand::Main(const MapPnOpts &options) {
-  PnRecord rec;
-  std::shared_ptr<arrow::RecordBatch> record;
-
-  auto& pn_bits_builder = *lrn_builder_->GetFieldAs<arrow::UInt64Builder>(0);
-  auto& rn_bits_builder = *lrn_builder_->GetFieldAs<arrow::UInt64Builder>(1);
-  auto& spam_score = *ym_builder_->GetFieldAs<arrow::FloatBuilder>(0);
-  auto& fraud_prob = *ym_builder_->GetFieldAs<arrow::FloatBuilder>(1);
-  auto& unlawful_prob = *ym_builder_->GetFieldAs<arrow::FloatBuilder>(2);
-  auto& tcpa_fraud_prob = *ym_builder_->GetFieldAs<arrow::FloatBuilder>(3);
-  auto& rn_builder = *rn_builder_->GetFieldAs<arrow::UInt64Builder>(0);
-  auto& pn_set_builder = *rn_builder_->GetFieldAs<arrow::BinaryBuilder>(1);
-
-  csv_.lrn.clear();
-  csv_.lrn.reserve(options.lrn_data_paths.size());
-  for (const std::string &lrn_path : options.lrn_data_paths) {
-    auto &parser = csv_.lrn.emplace_back();
-    parser.Open(lrn_path.c_str());
-  }
-  csv_.dnc.Open(options.dnc_data_path.c_str());
-  csv_.dno.Open(options.dno_data_path.c_str());
-  csv_.youmail.Open(options.youmail_data_path.c_str());
-
-  ARROW_ASSIGN_OR_RAISE(ostream_,
-                        arrow::io::FileOutputStream::Open(options.output_path));
-  ARROW_ASSIGN_OR_RAISE(table_writer_,
-                        arrow::ipc::MakeFileWriter(ostream_, lrn_builder_->schema()));
-
-  ARROW_ASSIGN_OR_RAISE(ym_ostream_,
-                        arrow::io::FileOutputStream::Open(options.ym_output_path));
-  ARROW_ASSIGN_OR_RAISE(ym_writer_,
-                        arrow::ipc::MakeFileWriter(ym_ostream_, ym_builder_->schema()));
-
-  ARROW_ASSIGN_OR_RAISE(rn_ostream_,
-                        arrow::io::FileOutputStream::Open(options.rn_output_path));
-  ARROW_ASSIGN_OR_RAISE(rn_writer_,
-                        arrow::ipc::MakeFileWriter(rn_ostream_, rn_builder_->schema()));
-
-  lrn_joiner_.Start(csv_);
-
-  uint32_t ym_id = 0;
-  int64_t tb = 0, ytb = 0, rtb = 0;
-  std::map<uint64_t, RnEncoder> rn2pn;
-
-  for (; lrn_joiner_.NextRow(csv_, rec); ) {
-    uint64_t pn = rec.lrn.pn | rec.dnc.pn | rec.dno.pn | rec.youmail.pn;
-    uint64_t pn_bits = pn << LRN_BITS_PN_SHIFT;
-    uint64_t rn_bits = rec.lrn.rn << LRN_BITS_PN_SHIFT;
-
-    if (rec.dnc.pn) /* present in DNC */
-      pn_bits |= LRN_BITS_DNC_FLAG;
-
-    if (rec.dno.pn) {/* encode DNO type */
-      pn_bits |= (rec.dno.type - 1) << LRN_BITS_DNO_SHIFT;
-      pn_bits |= LRN_BITS_DNO_FLAG;
-    }
-
-    if (rec.lrn.pn) { /* present in LRN */
-      pn_bits |= LRN_BITS_LRN_FLAG;
-      rn2pn[rec.lrn.rn].Add(pn);
-    }
-
-    if (rec.youmail.pn) { /* encode YouMail id */
-      pn_bits |= ym_id++ << LRN_BITS_YM_SHIFT;
-      ARROW_RETURN_NOT_OK(spam_score.Append(rec.youmail.spam_score));
-      ARROW_RETURN_NOT_OK(fraud_prob.Append(rec.youmail.fraud_prob));
-      ARROW_RETURN_NOT_OK(unlawful_prob.Append(rec.youmail.unlawful_prob));
-      ARROW_RETURN_NOT_OK(tcpa_fraud_prob.Append(rec.youmail.tcpa_fraud_prob));
-    } else {
-      pn_bits |= LRN_BITS_YM_MASK;
-    }
-
-    ARROW_RETURN_NOT_OK(pn_bits_builder.Append(pn_bits));
-    ARROW_RETURN_NOT_OK(rn_bits_builder.Append(rn_bits));
-
-    if (pn_bits_builder.length() == LRN_ROWS_PER_CHUNK) {
-      ARROW_ASSIGN_OR_RAISE(record, lrn_builder_->Flush());
-      ARROW_RETURN_NOT_OK(table_writer_->WriteRecordBatch(*record));
-
-      if (lrn_joiner_.NumRows() <= 10 * LRN_ROWS_PER_CHUNK) {
-        LOG(INFO) << "tell: " << ostream_->Tell().ValueOrDie() - tb << std::endl;
-        ARROW_CHECK_OK(ostream_->Tell().Value(&tb));
-      }
-    }
-
-    if (spam_score.length() == YM_ROWS_PER_CHUNK) {
-      ARROW_ASSIGN_OR_RAISE(record, ym_builder_->Flush());
-      ARROW_RETURN_NOT_OK(ym_writer_->WriteRecordBatch(*record));
-
-      if (ym_id <= 10 * YM_ROWS_PER_CHUNK) {
-        LOG(INFO) << "ytell: " << ym_ostream_->Tell().ValueOrDie() - ytb << std::endl;
-        ARROW_CHECK_OK(ym_ostream_->Tell().Value(&ytb));
-      }
-    }
-  }
-
-  for (auto &lrn : csv_.lrn)
-    lrn.Close();
-  csv_.dnc.Close();
-  csv_.dno.Close();
-  csv_.youmail.Close();
-
-  for (auto &lrn : csv_.lrn)
-    LOG(INFO) << "#lrn_rows: " << lrn.NumRows(); // TODO: to metadata
-  LOG(INFO) << "#dnc_rows: " << csv_.dnc.NumRows();
-  LOG(INFO) << "#dno_rows: " << csv_.dno.NumRows();
-  LOG(INFO) << "#ym_rows: " << csv_.youmail.NumRows();
-
-  ARROW_ASSIGN_OR_RAISE(record, lrn_builder_->Flush(true));
-  ARROW_RETURN_NOT_OK(table_writer_->WriteRecordBatch(*record));
-  tb = ostream_->Tell().ValueOrDie();
-  ARROW_RETURN_NOT_OK(table_writer_->Close());
-  LOG(INFO) << "Arrow footer bytes: "
-            << ostream_->Tell().ValueOrDie() - tb << std::endl;
-
-  ARROW_ASSIGN_OR_RAISE(record, ym_builder_->Flush(true));
-  ARROW_RETURN_NOT_OK(ym_writer_->WriteRecordBatch(*record));
-  ytb = ym_ostream_->Tell().ValueOrDie();
-  ARROW_RETURN_NOT_OK(ym_writer_->Close());
-  LOG(INFO) << "YM Arrow footer bytes: "
-            << ym_ostream_->Tell().ValueOrDie() - ytb << std::endl;
-
-  LOG(INFO) << "Writing RN table";
-  for (auto &kv : rn2pn) {
-    uint64_t rn = kv.first;
-    const std::string &pn_set = kv.second.Finish();
-    ARROW_RETURN_NOT_OK(rn_builder.Append(rn));
-    ARROW_RETURN_NOT_OK(pn_set_builder.Append(pn_set));
-
-    if (rn_builder.length() == RN_ROWS_PER_CHUNK) {
-      ARROW_ASSIGN_OR_RAISE(record, rn_builder_->Flush());
-      ARROW_RETURN_NOT_OK(rn_writer_->WriteRecordBatch(*record));
-      LOG_EVERY_N(INFO, 10) << "rtell: " << rn_ostream_->Tell().ValueOrDie() - rtb << std::endl;
-      ARROW_CHECK_OK(rn_ostream_->Tell().Value(&rtb));
-    }
-  }
-
-  rn2pn.clear();
-
-  ARROW_ASSIGN_OR_RAISE(record, rn_builder_->Flush(true));
-  ARROW_RETURN_NOT_OK(rn_writer_->WriteRecordBatch(*record));
-  rtb = rn_ostream_->Tell().ValueOrDie();
-  ARROW_RETURN_NOT_OK(rn_writer_->Close());
-  LOG(INFO) << "RN Arrow footer bytes: "
-            << rn_ostream_->Tell().ValueOrDie() - rtb << std::endl;
-
-  return arrow::Status::OK();
-}
-
-void MapPN(const po::variables_map& optmap,
-           const std::vector<std::string> &args)
-{
-  MapPnOpts options{optmap, args};
-
-  arrow::Status st = MapPnCommand().Main(options);
-  if (!st.ok())
-    throw folly::ProgramExit(1, st.message());
-}
-
 
 struct BuildPTHashOpts {
   //explicit BuildPTHashOpts() noexcept = default;
@@ -423,8 +100,17 @@ class CountingIpcFileFormat : public ds::IpcFileFormat {
   }
 };
 
-void BuildPTHash2(const po::variables_map& options,
-                  const std::vector<std::string> &args)
+class BucketPartitionerCommand {
+ public:
+  explicit BucketPartitionerCommand();
+  //arrow::Status Main(const BucketPartitionerOptions &opts);
+
+ private:
+
+};
+
+void PartitionByBucket(const po::variables_map& options,
+                       const std::vector<std::string> &args)
 {
   RegisterCustomFunctions(cp::GetFunctionRegistry());
   arrow::dataset::internal::Initialize();
@@ -475,13 +161,13 @@ void BuildPTHash2(const po::variables_map& options,
     std::ceil((config_c * num_rows) / std::log2(num_rows));
 
   ds::FileSystemDatasetWriteOptions write_options;
-  write_options.existing_data_behavior = ds::ExistingDataBehavior::kOverwriteOrIgnore;
+  write_options.existing_data_behavior = ds::ExistingDataBehavior::kDeleteMatchingPartitions;
   write_options.filesystem = std::make_shared<arrow::fs::LocalFileSystem>();
   write_options.base_dir = "parts/";
   write_options.file_write_options = std::make_shared<CountingIpcFileFormat>()
       ->DefaultWriteOptions();
   write_options.partitioning = std::make_shared<ds::FilenamePartitioning>(
-    arrow::schema({arrow::field("part", arrow::uint32())}));
+    arrow::schema({arrow::field("partition", arrow::uint16())}));
   write_options.basename_template = "pn.{i}.arrow";
   write_options.max_partitions = num_partitions;
   //write_options.max_rows_per_group = LRN_ROWS_PER_CHUNK;
@@ -490,7 +176,7 @@ void BuildPTHash2(const po::variables_map& options,
   cp::Declaration::Sequence({
     {"source", cp::SourceNodeOptions{reader->schema(), to_exec_batch}},
     {"project", cp::ProjectNodeOptions{
-      {cp::call("x_pthash_partitioner", {
+      {cp::call("x_pthash_partition", {
           cp::call("shift_right", {
             cp::field_ref("pn_bits"),
             cp::literal(UINT64_C(30))
@@ -498,7 +184,7 @@ void BuildPTHash2(const po::variables_map& options,
         }, std::make_shared<BucketerOptions>(num_buckets, num_partitions)),
        cp::field_ref("pn_bits"),
        cp::field_ref("rn_bits")},
-      {"part", "pn_bits", "rn_bits"}
+      {"partition", "pn_bits", "rn_bits"}
     }},
     {"write", ds::WriteNodeOptions{write_options}},
   }).AddToPlan(plan.get())
@@ -739,7 +425,7 @@ void Query(const po::variables_map& options,
     uint64_t rn_bits = rn_column->Value(pos);
     uint64_t ym_id = pn_bits & LRN_BITS_YM_MASK;
     uint64_t pn = pn_bits >> LRN_BITS_PN_SHIFT;
-    uint64_t dno_raw = (pn_bits & LRN_BITS_DNO_MASK) >> LRN_BITS_DNO_SHIFT;
+    uint64_t dno = (pn_bits & LRN_BITS_DNO_MASK) >> LRN_BITS_DNO_SHIFT;
 
     LOG(INFO) << "pthash: " << row_index << " bits: " << pn_bits;
     std::cout << "pn: " << query << ' ';
@@ -758,8 +444,8 @@ void Query(const po::variables_map& options,
       std::cout << "rn: " << (rn_bits >> LRN_BITS_PN_SHIFT) << ' ';
     if (pn_bits & LRN_BITS_DNC_FLAG)
       std::cout << "dnc ";
-    if (pn_bits & LRN_BITS_DNO_FLAG)
-      std::cout << "dno: " << dno_raw + 1 << ' ';
+    if (dno)
+      std::cout << "dno: " << dno << ' ';
 
     if (ym_id != LRN_BITS_YM_MASK) {
       ym_id >>= LRN_BITS_YM_SHIFT;
@@ -804,51 +490,24 @@ void Query(const po::variables_map& options,
 // }
 
 int main(int argc, const char* argv[]) {
+  using namespace std::placeholders;
+
   setlocale(LC_ALL, "C");
+  google::InitGoogleLogging(argv[0]);
   google::InstallFailureSignalHandler();
 
   folly::NestedCommandLineApp app{argv[0], "0.9", "", "", nullptr};
   app.addGFlags(folly::ProgramOptionsStyle::GNU);
   FLAGS_logtostderr = 1;
 
-  auto& map_pn_cmd = app.addCommand(
-      "map-pn", "lrn_csv_path [additional_lrn_path...]",
-      "Convert PN data from multiple sources into arrow format",
-      "Read multiple CSV data sources and convert them\n"
-      " to a single arrow table.\n\n"
-      "Glossary:\nPN, RN - 10-digit numbers (34 bits)\n"
-      "LRN: an ordered adjective mapping from PN to RN\n"
-      "DNC: an ordered set of PN numbers (PN concatenated from 2 rows)\n"
-      "DNO: an ordered mapping from PN to 1..8\n", MapPN);
-
-  map_pn_cmd.add_options()
-      (OPT_MAP_PN_DNC,
-       po::value<std::string>()->default_value("/dev/null"),
-       "DNC database path (CSV). Optional.\n"
-       "Example row:\n  201,0000000")
-      (OPT_MAP_PN_DNO,
-       po::value<std::string>()->default_value("/dev/null"),
-       "DNO database path (CSV). Optional.\n"
-       "Example row:\n  2012000000,4")
-      (OPT_MAP_PN_YOUMAIL,
-       po::value<std::string>()->default_value("/dev/null"),
-       "YouMail database path (CSV). Optional.\n"
-       "Example row:\n  +12032614649,ALMOST_CERTAINLY,0.95,0.95,0.95")
-      (OPT_MAP_PN_OUTPUT ",O",
-       po::value<std::string>()->required(),
-       "Arrow PN table output path. Required.")
-      (OPT_MAP_PN_YM_OUTPUT ",Y",
-       po::value<std::string>()->default_value("/dev/null"),
-       "Arrow table output path. Required if YouMail present.")
-      (OPT_MAP_PN_RN_OUTPUT ",R",
-       po::value<std::string>()->required(),
-       "Arrow RN table output path. Required.");
+  PnOrderedJoinOptions pn_ordered_join;
+  pn_ordered_join.AddCommand(app);
 
   app.addCommand(
       "pthash-partition", "",
       "",
       "",
-      BuildPTHash2);
+      PartitionByBucket);
 
   auto& pthash_pn_cmd = app.addCommand(
       "pthash-build", "arrow_table_path",

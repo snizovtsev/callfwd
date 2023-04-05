@@ -20,7 +20,7 @@ struct DNCRow {
 struct YouMailRow {
   uint64_t pn;
   float spam_score;
-  float fraud_prob;
+  float fraud_prob;/* optional */
   float unlawful_prob;
   float tcpa_fraud_prob;
 };

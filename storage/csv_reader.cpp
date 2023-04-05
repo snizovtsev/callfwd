@@ -15,21 +15,23 @@ extern "C" {
 #include <cstring>
 #include <cstdint>
 #include <cstdlib>
+#include <cmath>
 
 #define likely GOOGLE_PREDICT_TRUE
 #define unlikely GOOGLE_PREDICT_FALSE
 
 void ZsvReader::Open(const char *csv_path) {
-  struct zsv_opts opts;
+  Close();
 
   pipe_ = std::fopen(csv_path, "r");
   CHECK(pipe_ && !std::ferror(pipe_));
 
+  struct zsv_opts opts;
   std::memset(&opts, 0, sizeof(opts));
   opts.stream = pipe_;
-  num_rows_ = 0;
 
   zsv_ = zsv_new(&opts);
+  // zsv_set_context(zsv_, this);
   CHECK(zsv_);
 }
 
@@ -43,6 +45,8 @@ void ZsvReader::Close() noexcept {
     std::fclose(pipe_);
     pipe_ = nullptr;
   }
+
+  num_rows_ = 0;
 }
 
 ZsvReader::~ZsvReader() noexcept {
@@ -117,7 +121,7 @@ bool DNOReader::NextRow(DNORow &row) {
   row.type = strtoul(val, &end, 10);
   CHECK(end == val + cell.len);
   CHECK_GE(row.type, 1u);
-  CHECK_LE(row.type, 8u);
+  CHECK_LE(row.type, 9u);
 
   return true;
 }
@@ -141,6 +145,9 @@ static const float kFraudProbabilityValues[9] =
 static float ParseYouMailProbability(const char *token, uint32_t len) {
   std::string safe_token;
   const char *pos;
+
+  if (len == 0)
+    return std::nanf("");
 
   safe_token.reserve(len + 2);
   safe_token.append(":");

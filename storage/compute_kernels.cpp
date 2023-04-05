@@ -5,7 +5,9 @@
 #include <arrow/api.h>
 #include <arrow/compute/api.h>
 #include <arrow/compute/function_internal.h>
+#include <arrow/compute/kernel.h>
 #include <folly/Likely.h>
+#include <folly/lang/Hint.h>
 #include <glog/logging.h>
 #include <arrow/util/logging.h>
 
@@ -16,48 +18,122 @@ namespace cp = arrow::compute;
 namespace {
 
 struct SkewBucketer {
-  explicit SkewBucketer(uint32_t num_buckets, uint32_t num_partitions = 1);
-  uint32_t bucket(uint64_t hashed_key) const;
-  uint32_t partition(uint64_t hashed_key) const;
-  uint32_t num_buckets() const { return dense_buckets + sparse_buckets; }
+  explicit SkewBucketer(uint32_t num_buckets);
+
+  /* Returns an integer in range [-sparse_buckets .. dense_buckets) */
+  int32_t operator()(uint64_t hashed_key) const;
+
+  /* Return an integer in range [0 .. num_buckets) */
+  uint32_t to_index(int32_t bucket) const {
+    return (bucket >= 0) ? bucket : (dense_buckets - bucket - 1);
+  }
+
+  /* Equals to construction time parameter. */
+  uint32_t num_buckets() const {
+    return dense_buckets + sparse_buckets;
+  }
 
   uint32_t dense_buckets;
   uint32_t sparse_buckets;
-  uint64_t M_dense_block;
-  uint64_t M_sparse_block;
   __uint128_t M_dense_buckets;
   __uint128_t M_sparse_buckets;
 };
 
 // TODO: adjust to primes?
-SkewBucketer::SkewBucketer(uint32_t num_buckets, uint32_t num_partitions)
+SkewBucketer::SkewBucketer(uint32_t num_buckets)
     : dense_buckets(0.3 * num_buckets)
     , sparse_buckets(num_buckets - dense_buckets)
-    , M_dense_block(fastmod_computeM_u32((dense_buckets + num_partitions - 1) / num_partitions))
-    , M_sparse_block(fastmod_computeM_u32((sparse_buckets + num_partitions - 1) / num_partitions))
     , M_dense_buckets(fastmod_computeM_u64(dense_buckets))
     , M_sparse_buckets(fastmod_computeM_u64(sparse_buckets))
 {}
 
-uint32_t SkewBucketer::bucket(uint64_t hashed_key) const {
+int32_t SkewBucketer::operator()(uint64_t hashed_key) const {
   static constexpr uint64_t threshold = 0.6 * UINT64_MAX;
+  int32_t ret;
   if (FOLLY_BUILTIN_EXPECT_WITH_PROBABILITY(hashed_key < threshold, 1, 0.6)) {
-    return fastmod_u64(hashed_key, M_dense_buckets, dense_buckets);
+    ret = fastmod_u64(hashed_key, M_dense_buckets, dense_buckets);
+    folly::compiler_may_unsafely_assume(ret >= 0);
   } else {
-    return dense_buckets
-        + fastmod_u64(hashed_key, M_sparse_buckets, sparse_buckets);
+    ret = -1 - fastmod_u64(hashed_key, M_sparse_buckets, sparse_buckets);
+    folly::compiler_may_unsafely_assume(ret < 0);
+  }
+  return ret;
+}
+
+template<class IntegerA, class IntegerB>
+IntegerA DivideAndRoundUp(IntegerA a, IntegerB b) {
+  return (a + b - 1) / b;
+}
+
+struct BucketPartitioner {
+  explicit BucketPartitioner(const SkewBucketer& bucketer,
+                             uint16_t num_partitions);
+  explicit BucketPartitioner(uint32_t dense_block,
+                             uint32_t sparse_block);
+
+  /* Returns a number in range [0, num_partitions) */
+  uint16_t operator()(int32_t bucket) const;
+
+  uint64_t M_dense_block;
+  uint64_t M_sparse_block;
+};
+
+BucketPartitioner::BucketPartitioner(const SkewBucketer& bucketer,
+                                     uint16_t num_partitions)
+  : BucketPartitioner(DivideAndRoundUp(bucketer.dense_buckets, num_partitions),
+                      DivideAndRoundUp(bucketer.sparse_buckets, num_partitions))
+{}
+
+BucketPartitioner::BucketPartitioner(uint32_t dense_block, uint32_t sparse_block)
+    : M_dense_block(fastmod_computeM_u32(dense_block))
+    , M_sparse_block(fastmod_computeM_u32(sparse_block))
+{}
+
+uint16_t BucketPartitioner::operator()(int32_t bucket) const {
+  if (bucket >= 0) {
+    return fastdiv_u32(bucket, M_dense_block);
+  } else {
+    return fastdiv_u32(-(bucket + 1), M_sparse_block);
   }
 }
 
-uint32_t SkewBucketer::partition(uint64_t hashed_key) const {
-  static constexpr uint64_t threshold = 0.6 * UINT64_MAX;
-  if (FOLLY_BUILTIN_EXPECT_WITH_PROBABILITY(hashed_key < threshold, 1, 0.6)) {
-    return fastdiv_u32(fastmod_u64(hashed_key, M_dense_buckets, dense_buckets),
-                       M_dense_block);
+struct LocalBucketer {
+  explicit LocalBucketer(const SkewBucketer& bucketer,
+                         uint16_t num_partitions,
+                         int32_t sample_bucket);
+
+  explicit LocalBucketer(uint32_t dense_buckets, uint32_t sparse_buckets,
+                         uint16_t num_partitions, uint16_t partition);
+
+  /* Returns a number in range [0, DivideAndRoundUp(num_buckets, num_partitions)] */
+  uint32_t operator()(int32_t bucket) const;
+
+  uint32_t dense_offset;
+  uint32_t sparse_offset;
+};
+
+LocalBucketer::LocalBucketer(const SkewBucketer& bucketer,
+                             uint16_t num_partitions,
+                             int32_t sample_bucket)
+    : LocalBucketer(bucketer.dense_buckets, bucketer.sparse_buckets,
+                    num_partitions,
+                    BucketPartitioner(bucketer, num_partitions)(sample_bucket))
+{}
+
+LocalBucketer::LocalBucketer(uint32_t dense_buckets, uint32_t sparse_buckets,
+                             uint16_t num_partitions, uint16_t partition)
+    : dense_offset(DivideAndRoundUp(dense_buckets, num_partitions) * partition)
+    , sparse_offset(DivideAndRoundUp(sparse_buckets, num_partitions) * partition)
+{}
+
+uint32_t LocalBucketer::operator()(int32_t bucket) const {
+  uint32_t ret;
+  if (bucket >= 0) {
+    ret = bucket - dense_offset;
   } else {
-    return fastdiv_u32(fastmod_u64(hashed_key, M_sparse_buckets, sparse_buckets),
-                       M_sparse_block);
+    ret = -(bucket + 1) - sparse_offset;
   }
+  return ret;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -101,7 +177,7 @@ struct BucketCounter final : cp::KernelState {
 
   explicit BucketCounter(const BucketerOptions& options, arrow::MemoryPool* memory_pool)
       : hash_seed(options.hash_seed)
-      , bucketer(options.num_buckets, options.num_partitions)
+      , bucketer(options.num_buckets)
       , counts(memory_pool)
   {}
 
@@ -141,9 +217,10 @@ Status BucketCounter::Consume(cp::KernelContext* ctx, const cp::ExecSpan& batch)
   // XXX: Analyze vectorizer assembly and decide whether to split hashing
   for (uint32_t i = 0; i < batch.length; ++i) {
     uint64_t hashed_key = murmur3_64(pn[i], seed);
-    uint32_t bucket_index = bucketer.bucket(hashed_key);
-    DCHECK_LT(bucket_index, bucketer.num_buckets());
-    counts[bucket_index] += 1;
+    int32_t bucket = bucketer(hashed_key);
+    uint32_t index = bucketer.to_index(bucket);
+    DCHECK_LT(index, bucketer.num_buckets());
+    counts[index] += 1;
   }
   return Status::OK();
 }
@@ -203,56 +280,57 @@ void BucketCounter::AddKernels(cp::ScalarAggregateFunction* func) {
 //
 /////////////////////////////////////////////////////////////////////////////////
 
-// TODO: derive bucket size type (uint32_t) from output arg
 struct PTHashPartitioner final : cp::KernelState {
-  static Result<std::unique_ptr<cp::KernelState>>
-  Init(cp::KernelContext* ctx, const cp::KernelInitArgs& args);
+  static Result<std::unique_ptr<cp::KernelState>> Init(
+      cp::KernelContext* ctx, const cp::KernelInitArgs& args);
+  static Status Exec(
+      cp::KernelContext* ctx, const cp::ExecSpan& batch, cp::ExecResult *out);
+  static void AddKernels(
+      cp::ScalarFunction* func);
 
-  static Status Exec(cp::KernelContext* ctx, const cp::ExecSpan& batch, cp::ExecResult *out);
-  static void AddKernels(cp::ScalarFunction* func);
-
-  explicit PTHashPartitioner (const BucketerOptions& options)
+  explicit PTHashPartitioner(const BucketerOptions& options)
       : hash_seed(options.hash_seed)
-      , bucketer(options.num_buckets, options.num_partitions)
+      , bucketer(options.num_buckets)
+      , partitioner(bucketer, options.num_partitions)
   {}
 
-  uint64_t     hash_seed;
-  SkewBucketer bucketer;
+  uint64_t          hash_seed;
+  SkewBucketer      bucketer;
+  BucketPartitioner partitioner;
 };
 
 Result<std::unique_ptr<cp::KernelState>>
 PTHashPartitioner::Init(cp::KernelContext* ctx, const cp::KernelInitArgs& args) {
   auto options = checked_cast<const BucketerOptions*>(args.options);
-  auto state = std::make_unique<PTHashPartitioner>(*options);
-  state->hash_seed = options->hash_seed;
-  return state;
+  return std::make_unique<PTHashPartitioner>(*options);
 }
 
-Status PTHashPartitioner::Exec(cp::KernelContext* ctx, const cp::ExecSpan& batch, cp::ExecResult *out)
-{
+Status PTHashPartitioner::Exec(cp::KernelContext* ctx, const cp::ExecSpan& batch,
+                               cp::ExecResult *out) {
   auto& state = checked_cast<PTHashPartitioner&>(*ctx->state());
-  const SkewBucketer& bucketer = state.bucketer;
-
   const uint64_t* pn = batch[0].array.GetValues<uint64_t>(1);
-  uint32_t* partition = out->array_span()->GetValues<uint32_t>(1);
-  uint64_t seed = state.hash_seed;
+  uint16_t* partition = out->array_span()->GetValues<uint16_t>(1);
 
-  VLOG(2) << "Job " << &state << ": "
+  VLOG(2) << "PTHash partitioner job " << &state << ": "
           << pn[0] << " to " << pn[batch.length-1]
           << "of length " << batch.length;
 
-  for (uint32_t i = 0; i < batch.length; ++i) {
-    uint64_t hashed_key = murmur3_64(pn[i], seed);
-    partition[i] = bucketer.partition(hashed_key);
+  for (int64_t i = 0; i < batch.length; ++i) {
+    uint64_t hashed_key = murmur3_64(pn[i], state.hash_seed);
+    int32_t bucket = state.bucketer(hashed_key);
+    partition[i] = state.partitioner(bucket);
   }
   return Status::OK();
 }
 
 void PTHashPartitioner::AddKernels(cp::ScalarFunction* func) {
-  auto sig = cp::KernelSignature::Make({arrow::uint64()}, arrow::uint32());
-  cp::ScalarKernel kernel(std::move(sig), PTHashPartitioner::Exec, PTHashPartitioner::Init);
-  // Set the simd level
+  cp::ScalarKernel kernel{
+    {arrow::uint64()}, arrow::uint16(),
+    PTHashPartitioner::Exec,
+    PTHashPartitioner::Init
+  };
   kernel.simd_level = cp::SimdLevel::NONE;
+  //kernel.null_handling = cp::NullHandling::COMPUTED_PREALLOCATE;
   kernel.mem_allocation = cp::MemAllocation::PREALLOCATE;
   kernel.parallelizable = true;
   DCHECK_OK(func->AddKernel(std::move(kernel)));
@@ -271,7 +349,7 @@ void RegisterCustomFunctions(cp::FunctionRegistry* registry) {
   DCHECK_OK(registry->AddFunction(std::move(func1)));
 
   auto func2 = std::make_shared<cp::ScalarFunction>(
-      "x_pthash_partitioner", cp::Arity::Unary(), cp::FunctionDoc::Empty(), &default_bucketer_options);
+      "x_pthash_partition", cp::Arity::Unary(), cp::FunctionDoc::Empty(), &default_bucketer_options);
   PTHashPartitioner::AddKernels(func2.get());
   DCHECK_OK(registry->AddFunction(std::move(func2)));
 }

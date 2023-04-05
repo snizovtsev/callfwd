@@ -7,13 +7,16 @@ package(
 cc_binary(
     name = "builder",
     srcs = [
-        "builder.cpp",
         "bit_magic.hpp",
+        "builder.cpp",
         "compute_kernels.cpp",
         "compute_kernels.hpp",
         "csv_reader.cpp",
         "csv_reader.hpp",
         "csv_records.hpp",
+        "pn_ordered_join.cpp",
+        "pn_ordered_join.hpp",
+        "pn_ordered_join_internal.hpp",
     ],
     deps = [
         "//third_party/arrow:arrow",
