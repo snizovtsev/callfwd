@@ -8,7 +8,6 @@
 #include <arrow/compute/kernel.h>
 #include <folly/Likely.h>
 #include <folly/lang/Hint.h>
-#include <glog/logging.h>
 #include <arrow/util/logging.h>
 
 using arrow::Result;
@@ -190,7 +189,7 @@ Result<std::unique_ptr<cp::KernelState>>
 BucketCounter::Init(cp::KernelContext* ctx, const cp::KernelInitArgs& args) {
   auto options = checked_cast<const BucketerOptions*>(args.options);
   auto state = std::make_unique<BucketCounter>(*options, ctx->memory_pool());
-  VLOG(1) << "Make job " << state.get();
+  ARROW_LOG(DEBUG) << "Make job " << state.get();
   return state;
 }
 
@@ -202,17 +201,17 @@ Status BucketCounter::Consume(cp::KernelContext* ctx, const cp::ExecSpan& batch)
    * To avoid wasting large chunks of memory we have to allocate it lazily. */
   if (ARROW_PREDICT_FALSE(state.counts.length() == 0)) {
     ARROW_RETURN_NOT_OK(state.counts.Append(bucketer.num_buckets(), 0));
-    VLOG(1) << "Init job " << &state << ", bytes allocated: "
-            << state.counts.bytes_builder()->capacity();
+    ARROW_LOG(DEBUG) << "Init job " << &state << ", bytes allocated: "
+                     << state.counts.bytes_builder()->capacity();
   }
 
   const uint64_t* pn = batch[0].array.GetValues<uint64_t>(1);
   uint16_t* counts = state.counts.mutable_data();
   uint64_t seed = state.hash_seed;
 
-  VLOG(2) << "Job " << &state << ": "
-          << pn[0] << " to " << pn[batch.length-1]
-          << "of length " << batch.length;
+  ARROW_LOG(DEBUG) << "Job " << &state << ": "
+                   << pn[0] << " to " << pn[batch.length-1]
+                   << "of length " << batch.length;
 
   // XXX: Analyze vectorizer assembly and decide whether to split hashing
   for (uint32_t i = 0; i < batch.length; ++i) {
@@ -242,7 +241,7 @@ Status BucketCounter::Merge(cp::KernelContext*, cp::KernelState&& other_state,
     return Status::OK();
   }
 
-  VLOG(1) << "Merge job " << kernel_state << ' ' << &other_state;
+  ARROW_LOG(DEBUG) << "Merge job " << kernel_state << ' ' << &other_state;
   DCHECK_EQ(num_buckets, other.bucketer.num_buckets());
 
   for (uint32_t i = 0; i < num_buckets; ++i)
@@ -253,7 +252,7 @@ Status BucketCounter::Merge(cp::KernelContext*, cp::KernelState&& other_state,
 }
 
 Status BucketCounter::Finalize(cp::KernelContext* ctx, arrow::Datum* out) {
-  VLOG(1) << "Finalize " << ctx->state();
+  ARROW_LOG(DEBUG) << "Finalize " << ctx->state();
 
   auto& state = checked_cast<BucketCounter&>(*ctx->state());
   std::shared_ptr<arrow::Buffer> counts_data;
@@ -311,9 +310,9 @@ Status PTHashPartitioner::Exec(cp::KernelContext* ctx, const cp::ExecSpan& batch
   const uint64_t* pn = batch[0].array.GetValues<uint64_t>(1);
   uint16_t* partition = out->array_span()->GetValues<uint16_t>(1);
 
-  VLOG(2) << "PTHash partitioner job " << &state << ": "
-          << pn[0] << " to " << pn[batch.length-1]
-          << "of length " << batch.length;
+  ARROW_LOG(DEBUG) << "PTHash partitioner job " << &state << ": "
+                   << pn[0] << " to " << pn[batch.length-1]
+                   << "of length " << batch.length;
 
   for (int64_t i = 0; i < batch.length; ++i) {
     uint64_t hashed_key = murmur3_64(pn[i], state.hash_seed);

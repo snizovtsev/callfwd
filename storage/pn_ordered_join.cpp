@@ -1,8 +1,8 @@
+#include "lrn_schema.hpp"
 #include "pn_ordered_join_internal.hpp"
 #include "pn_ordered_join.hpp"
 
 #include <folly/experimental/NestedCommandLineApp.h>
-#include <arrow/util/logging.h>
 
 #include <memory>
 
@@ -53,13 +53,13 @@ Status PnOrderedJoin::Reset(const PnOrderedJoinOptions &options,
 
   ARROW_RETURN_NOT_OK(
       pn_writer.Reset(pn_schema(), options.pn_output_path,
-                      memory_pool, LRN_ROWS_PER_CHUNK));
+                      memory_pool, options.pn_rows_per_batch));
   ARROW_RETURN_NOT_OK(
       ym_writer.Reset(ym_schema(), options.ym_output_path,
-                      memory_pool, YM_ROWS_PER_CHUNK));
+                      memory_pool, options.ym_rows_per_batch));
   ARROW_RETURN_NOT_OK(
       rn_writer.Reset(rn_schema(), options.rn_output_path,
-                      memory_pool, RN_ROWS_PER_CHUNK));
+                      memory_pool, options.rn_rows_per_batch));
 
   return Status::OK();
 }
@@ -71,7 +71,9 @@ Status RegularTableWriter::Reset(const std::shared_ptr<arrow::Schema>& schema,
 {
   RegularTableWriter draft;
 
+  draft.metadata = std::make_shared<arrow::KeyValueMetadata>();
   draft.file_path = file_path;
+
   ARROW_ASSIGN_OR_RAISE(draft.builder, arrow::RecordBatchBuilder::Make(
       schema, memory_pool, /*initial_capacity=*/ rows_per_batch));
   ARROW_ASSIGN_OR_RAISE(draft.ostream, arrow::io::FileOutputStream::Open(
@@ -80,7 +82,7 @@ Status RegularTableWriter::Reset(const std::shared_ptr<arrow::Schema>& schema,
   arrow::ipc::IpcWriteOptions options;
   options.memory_pool = memory_pool;
   ARROW_ASSIGN_OR_RAISE(draft.writer, arrow::ipc::MakeFileWriter(
-      draft.ostream, schema, options /*,metadata*/));
+      draft.ostream, schema, options, draft.metadata));
 
   *this = std::move(draft);
   return Status::OK();
@@ -157,16 +159,17 @@ Status RegularTableWriter::Advance() {
   ARROW_ASSIGN_OR_RAISE(auto batch, builder->Flush());
   ARROW_RETURN_NOT_OK(writer->WriteRecordBatch(*batch));
 
-  if (ARROW_PREDICT_FALSE(writer->stats().num_record_batches == 1)) {
+  if (ARROW_PREDICT_FALSE(num_record_batches() == 1)) {
     header_bytes = ostream->Tell().ValueOr(0);
   }
 
-  if (ARROW_PREDICT_FALSE(writer->stats().num_record_batches == 2)) {
+  if (ARROW_PREDICT_FALSE(num_record_batches() == 2)) {
     record_bytes = ostream->Tell().ValueOr(0) - header_bytes;
     header_bytes -= record_bytes;
     LOG(INFO) << file_path << " layout: "
-              << header_bytes << " byte header, "
-              << record_bytes << " byte records";
+              << header_bytes << " byte header "
+              << record_bytes << " byte "
+              << column->capacity() << " row records";
   }
 
   static constexpr int64_t k100mb = 100 * (1 << 20);
@@ -182,10 +185,14 @@ Status RegularTableWriter::Advance() {
 
 Status RegularTableWriter::Finish() {
   ARROW_ASSIGN_OR_RAISE(auto batch, builder->Flush(true));
-  ARROW_RETURN_NOT_OK(writer->WriteRecordBatch(*batch));
-  LOG(INFO) << "Arrow footer bytes: " << ostream->Tell().ValueOr(-1);
+  int64_t num_rows = num_record_batches() * rows_per_batch();
+  if (batch->num_rows())
+    ARROW_RETURN_NOT_OK(writer->WriteRecordBatch(*batch));
+  metadata->Append("num_rows", std::to_string(num_rows));
+  footer_bytes = ostream->Tell().ValueOr(0);
   ARROW_RETURN_NOT_OK(writer->Close());
-  LOG(INFO) << "Arrow footer bytes: " << ostream->Tell().ValueOr(-1);
+  footer_bytes = ostream->Tell().ValueOr(0) - footer_bytes;
+  LOG(INFO) << file_path << " footer: " << footer_bytes << " bytes";
   return arrow::Status::OK();
 }
 
@@ -275,12 +282,18 @@ void PnOrderedJoinOptions::BindToOptions(po::options_description& description) {
       ("output,O",
        po::value(&pn_output_path)->required(),
        "Arrow PN table output path. Required.")
+      ("output-batch",
+       po::value(&pn_rows_per_batch)->default_value(LRN_ROWS_PER_CHUNK))
       ("ym-output,Y",
        po::value(&ym_output_path)->default_value(devnull),
        "Arrow table output path. Required if YouMail present.")
+      ("ym-batch",
+       po::value(&ym_rows_per_batch)->default_value(YM_ROWS_PER_CHUNK))
       ("rn-output,R",
        po::value(&rn_output_path)->required(),
-       "Arrow RN table output path. Required.");
+       "Arrow RN table output path. Required.")
+      ("rn-batch",
+       po::value(&rn_rows_per_batch)->default_value(RN_ROWS_PER_CHUNK));
 }
 
 void PnOrderedJoinOptions::Store(const po::variables_map& vm,

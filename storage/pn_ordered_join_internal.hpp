@@ -7,7 +7,6 @@
 #include <arrow/api.h>
 #include <arrow/io/api.h>
 #include <arrow/ipc/api.h>
-#include <arrow/memory_pool.h>
 
 #include <memory>
 #include <map>
@@ -27,6 +26,14 @@ struct RegularTableWriter {
   arrow::Status Advance();
   arrow::Status Finish();
 
+  int64_t rows_per_batch() const {
+    return builder->GetField(0)->capacity();
+  }
+
+  int64_t num_record_batches() const {
+    return writer->stats().num_record_batches;
+  }
+
   template <typename T>
   T* GetFieldAs(int i) const {
     return builder->GetFieldAs<T>(i);
@@ -40,6 +47,7 @@ struct RegularTableWriter {
   int64_t last_report_bytes = 0;
 
   std::string file_path;
+  std::shared_ptr<arrow::KeyValueMetadata> metadata;
   std::unique_ptr<arrow::RecordBatchBuilder> builder;
   std::shared_ptr<arrow::io::FileOutputStream> ostream;
   std::shared_ptr<arrow::ipc::RecordBatchWriter> writer;

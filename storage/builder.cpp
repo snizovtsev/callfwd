@@ -14,7 +14,6 @@
 #include <arrow/util/unreachable.h>
 #include <arrow/util/thread_pool.h>
 #include <glog/logging.h>
-#include <arrow/util/logging.h>
 #include <folly/experimental/NestedCommandLineApp.h>
 #include <folly/GroupVarint.h>
 #include <folly/Conv.h>
