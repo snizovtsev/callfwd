@@ -81,6 +81,7 @@ class MonotonicVarintSequenceEncoder {
 };
 
 struct PnOrderedJoinPriv {
+  arrow::MemoryPool *memory_pool;
   PnRecord row;
   PnMultiReader reader;
   PnRecordJoiner joiner;

@@ -47,13 +47,11 @@ struct PnOrderedJoin
 {
   static std::unique_ptr<PnOrderedJoin> Make(
       arrow::MemoryPool* memory_pool = arrow::default_memory_pool());
+  static std::shared_ptr<arrow::Schema> pn_schema();
+  static std::shared_ptr<arrow::Schema> ym_schema();
+  static std::shared_ptr<arrow::Schema> rn_schema();
 
-  std::shared_ptr<arrow::Schema> pn_schema();
-  std::shared_ptr<arrow::Schema> ym_schema();
-  std::shared_ptr<arrow::Schema> rn_schema();
-
-  arrow::Status Reset(const PnOrderedJoinOptions &options,
-                      arrow::MemoryPool* memory_pool);
+  arrow::Status Reset(const PnOrderedJoinOptions &options);
   arrow::Status Drain(uint32_t limit = UINT32_MAX);
   arrow::Status FlushRnData();
 };

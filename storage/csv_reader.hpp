@@ -40,6 +40,10 @@ struct YouMailReader : ZsvReader {
 };
 
 struct PnMultiReader {
+  PnMultiReader();
+  ~PnMultiReader();
+  void Close();
+
   std::vector<LRNReader> lrn;
   DNCReader              dnc;
   DNOReader              dno;

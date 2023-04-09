@@ -35,8 +35,14 @@ std::shared_ptr<arrow::Schema> PnOrderedJoin::rn_schema() {
   return schema;
 }
 
-Status PnOrderedJoin::Reset(const PnOrderedJoinOptions &options,
-                            arrow::MemoryPool* memory_pool)
+std::unique_ptr<PnOrderedJoin> PnOrderedJoin::Make(arrow::MemoryPool* memory_pool)
+{
+  auto cmd = std::make_unique<PnOrderedJoin>();
+  cmd->memory_pool = memory_pool;
+  return cmd;
+}
+
+Status PnOrderedJoin::Reset(const PnOrderedJoinOptions &options)
 {
   reader.lrn.clear();
   reader.lrn.reserve(options.lrn_data_paths.size());
@@ -60,6 +66,10 @@ Status PnOrderedJoin::Reset(const PnOrderedJoinOptions &options,
   ARROW_RETURN_NOT_OK(
       rn_writer.Reset(rn_schema(), options.rn_output_path,
                       memory_pool, options.rn_rows_per_batch));
+
+  pn_writer.metadata->Append("dnc_source", options.dnc_data_path);
+  pn_writer.metadata->Append("dno_source", options.dno_data_path);
+  ym_writer.metadata->Append("source", options.ym_data_path);
 
   return Status::OK();
 }
@@ -132,17 +142,29 @@ Status PnOrderedJoin::Drain(uint32_t limit) {
     // TODO: not ok -> finish -> return
   }
 
+  pn_writer.metadata->Append("lrn_format", std::to_string(LRN_FORMAT));
+  pn_writer.metadata->Append("youmail_count", std::to_string(youmail_row_index));
+  pn_writer.metadata->Append("dnc_count", std::to_string(reader.dnc.NumRows()));
+  pn_writer.metadata->Append("dno_count", std::to_string(reader.dno.NumRows()));
+  pn_writer.metadata->Append("rn_count", std::to_string(rn_data.size()));
+
+  int64_t lrn_count = 0;
+  for (size_t i = 0; i < reader.lrn.size(); ++i) {
+    int64_t val = reader.lrn[i].NumRows();
+    std::string key = "lrn";
+    key += std::to_string(i) + "_count";
+    pn_writer.metadata->Append(key, std::to_string(val));
+    lrn_count += val;
+  }
+  pn_writer.metadata->Append("lrn_count", std::to_string(lrn_count));
+
   for (auto &lrn : reader.lrn)
     LOG(INFO) << "#lrn_rows: " << lrn.NumRows(); // TODO: to metadata
   LOG(INFO) << "#dnc_rows: " << reader.dnc.NumRows();
   LOG(INFO) << "#dno_rows: " << reader.dno.NumRows();
   LOG(INFO) << "#ym_rows: " << reader.youmail.NumRows();
 
-  for (auto &lrn : reader.lrn)
-    lrn.Close();
-  reader.dnc.Close();
-  reader.dno.Close();
-  reader.youmail.Close();
+  reader.Close();
 
   // TODO: not ok -> finish others -> return
   ARROW_RETURN_NOT_OK(pn_writer.Finish());
@@ -185,10 +207,14 @@ Status RegularTableWriter::Advance() {
 
 Status RegularTableWriter::Finish() {
   ARROW_ASSIGN_OR_RAISE(auto batch, builder->Flush(true));
-  int64_t num_rows = num_record_batches() * rows_per_batch();
   if (batch->num_rows())
     ARROW_RETURN_NOT_OK(writer->WriteRecordBatch(*batch));
+
+  int64_t num_rows = num_record_batches() * rows_per_batch();
   metadata->Append("num_rows", std::to_string(num_rows));
+  metadata->Append("rows_per_batch", std::to_string(rows_per_batch()));
+  metadata->Append("record_bytes", std::to_string(record_bytes));
+
   footer_bytes = ostream->Tell().ValueOr(0);
   ARROW_RETURN_NOT_OK(writer->Close());
   footer_bytes = ostream->Tell().ValueOr(0) - footer_bytes;
@@ -228,7 +254,7 @@ static void Main(PnOrderedJoinOptions& options,
   arrow::Status st;
 
   options.Store(vm, args);
-  st = command.Reset(options, arrow::default_memory_pool());
+  st = command.Reset(options);
 
   if (!st.ok())
     throw folly::ProgramExit(1, "error: " + st.message());
@@ -246,10 +272,10 @@ void PnOrderedJoinOptions::AddCommand(folly::NestedCommandLineApp &app,
                                       PnOrderedJoin *command)
 {
   using namespace std::placeholders;
-  static PnOrderedJoin default_command;
+  static auto default_command = PnOrderedJoin::Make();
 
   if (!command)
-    command = &default_command;
+    command = default_command.get();
 
   po::options_description& options = app.addCommand(
       "pn-ordered-join", "lrn_csv_path [additional_lrn_path...]",

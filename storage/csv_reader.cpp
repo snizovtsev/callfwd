@@ -279,3 +279,14 @@ bool PnRecordJoiner::NextRow(PnMultiReader &reader, PnRecord &rec) {
   ++num_rows_;
   return true;
 }
+
+PnMultiReader::PnMultiReader() = default;
+PnMultiReader::~PnMultiReader() = default;
+
+void PnMultiReader::Close() {
+  for (auto &lrn_item : lrn)
+    lrn_item.Close();
+  dnc.Close();
+  dno.Close();
+  youmail.Close();
+}

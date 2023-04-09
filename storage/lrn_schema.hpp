@@ -2,7 +2,7 @@
 #define CALLFWD_LRN_SCHEMA_H_
 
 enum {
-  DATA_VERSION       = 1, /* TODO */
+  LRN_FORMAT = 1,
   LRN_ROWS_PER_CHUNK = (256 / 16) * (1 << 10) - 12, /* 256 kb block */
   YM_ROWS_PER_CHUNK  = 256,  /*  */
   RN_ROWS_PER_CHUNK  = 128,  /*  */

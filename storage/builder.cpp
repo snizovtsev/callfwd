@@ -476,6 +476,19 @@ void Query(const po::variables_map& options,
   }
 }
 
+void Metadata(const po::variables_map& options,
+              const std::vector<std::string> &args)
+{
+  auto file = arrow::io::ReadableFile::Open(args[0])
+    .ValueOrDie();
+  auto reader = arrow::ipc::RecordBatchFileReader
+    ::Open(file, arrow::ipc::IpcReadOptions{})
+    .ValueOrDie();
+  for (const auto& kv : reader->metadata()->sorted_pairs()) {
+    std::cout << kv.first << ": " << kv.second << std::endl;
+  }
+}
+
 // template<class Entrypoint>
 // folly::NestedCommandLineApp::Command ArrowCommand(const Entrypoint &entrypoint)
 // {
@@ -549,6 +562,13 @@ int main(int argc, const char* argv[]) {
 
   // invert-rn rn_pn.arrow > rn0.arrow
   // verify
+  //
+
+  app.addCommand(
+    "metadata", "arrow_table_apth",
+    "Print table metadata",
+    "",
+    Metadata);
 
   return app.run(argc, argv);
 }
