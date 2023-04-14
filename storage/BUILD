@@ -18,6 +18,9 @@ cc_binary(
         "pn_ordered_join.cpp",
         "pn_ordered_join.hpp",
         "pn_ordered_join_internal.hpp",
+        "pthash_partitioner.cpp",
+        "pthash_partitioner.hpp",
+        "pthash_partitioner_internal.hpp",
     ],
     deps = [
         "//third_party/arrow:arrow",

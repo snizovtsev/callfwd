@@ -46,7 +46,7 @@ struct PnOrderedJoin
 #endif
 {
   static std::unique_ptr<PnOrderedJoin> Make(
-      arrow::MemoryPool* memory_pool = arrow::default_memory_pool());
+      arrow::MemoryPool* memory_pool = nullptr);
   static std::shared_ptr<arrow::Schema> pn_schema();
   static std::shared_ptr<arrow::Schema> ym_schema();
   static std::shared_ptr<arrow::Schema> rn_schema();

@@ -1,22 +1,22 @@
-#include "compute_kernels.hpp"
 #include "pn_ordered_join.hpp"
+#include "lrn_schema.hpp"
 #include "pthash/pthash.hpp"
+#include "pthash_partitioner.hpp"
+#include "compute_kernels.hpp"
 
 #include <arrow/api.h>
 #include <arrow/io/api.h>
 #include <arrow/ipc/api.h>
 #include <arrow/dataset/api.h>
-#include <arrow/dataset/plan.h>
+#include <arrow/dataset/plan.h> // Initialize
 #include <arrow/filesystem/api.h>
 #include <arrow/compute/api.h>
-#include <arrow/compute/exec/query_context.h>
 #include <arrow/ipc/feather.h>
-#include <arrow/util/unreachable.h>
 #include <arrow/util/thread_pool.h>
 #include <glog/logging.h>
+#include <arrow/util/logging.h>
+
 #include <folly/experimental/NestedCommandLineApp.h>
-#include <folly/GroupVarint.h>
-#include <folly/Conv.h>
 
 #include <functional>
 #include <iostream>
@@ -27,7 +27,6 @@
 #include <cstdlib>
 
 namespace po = ::boost::program_options;
-namespace cp = arrow::compute;
 namespace ds = arrow::dataset;
 
 struct BuildPTHashOpts {
@@ -43,163 +42,6 @@ struct BuildPTHashOpts {
 # define OPT_PTHASH_ALPHA  "tweak-alpha"
   float tweak_alpha;
 };
-
-class CountingFileWriter final : public ds::FileWriter {
- public:
-  explicit CountingFileWriter(std::shared_ptr<ds::FileWriter> wrapee,
-                              std::shared_ptr<arrow::KeyValueMetadata> metadata)
-      : FileWriter(wrapee->schema(), wrapee->options(), NULLPTR, wrapee->destination())
-      , wrapee_(std::move(wrapee))
-      , metadata_(std::move(metadata))
-  {}
-
-  arrow::Status Write(const std::shared_ptr<arrow::RecordBatch>& batch) override {
-    rows_written_ += batch->num_rows();
-    return wrapee_->Write(batch);
-  }
-
-  arrow::Future<> FinishInternal() override {
-    arrow::Unreachable();
-  }
-
-  arrow::Future<> Finish() override {
-    metadata_->Append("num_rows", std::to_string(rows_written_));
-    return wrapee_->Finish();
-  }
-
- private:
-  int64_t rows_written_ = 0;
-  std::shared_ptr<ds::FileWriter> wrapee_;
-  std::shared_ptr<arrow::KeyValueMetadata> metadata_;
-};
-
-class CountingIpcFileFormat : public ds::IpcFileFormat {
- public:
-  arrow::Result<std::shared_ptr<ds::FileWriter>> MakeWriter(
-      std::shared_ptr<arrow::io::OutputStream> destination,
-      std::shared_ptr<arrow::Schema> schema,
-      std::shared_ptr<ds::FileWriteOptions> options,
-      arrow::fs::FileLocator destination_locator) const override
-  {
-    auto cloned_options = std::dynamic_pointer_cast<ds::IpcFileWriteOptions>(options);
-    std::shared_ptr<arrow::KeyValueMetadata> cloned_metadata;
-
-    cloned_options = std::make_shared<ds::IpcFileWriteOptions>(*cloned_options);
-    if (cloned_options->metadata)
-      cloned_metadata = cloned_options->metadata->Copy();
-    else
-      cloned_metadata = arrow::KeyValueMetadata::Make({}, {});
-    cloned_options->metadata = cloned_metadata;
-
-    ARROW_ASSIGN_OR_RAISE(auto wrapee, ds::IpcFileFormat
-        ::MakeWriter(std::move(destination), std::move(schema),
-                     std::move(cloned_options), std::move(destination_locator)));
-    return std::make_shared<CountingFileWriter>(std::move(wrapee),
-                                                std::move(cloned_metadata));
-  }
-};
-
-class BucketPartitionerCommand {
- public:
-  explicit BucketPartitionerCommand();
-  //arrow::Status Main(const BucketPartitionerOptions &opts);
-
- private:
-
-};
-
-void PartitionByBucket(const po::variables_map& options,
-                       const std::vector<std::string> &args)
-{
-  RegisterCustomFunctions(cp::GetFunctionRegistry());
-  arrow::dataset::internal::Initialize();
-
-  CHECK_EQ(args.size(), 1u);
-
-  // construct an ExecPlan first to hold your nodes
-  LOG(INFO) << "Make plan";
-  cp::ExecContext* exec_context = cp::threaded_exec_context();
-  auto plan = cp::ExecPlan::Make(exec_context)
-    .ValueOrDie();
-
-  LOG(INFO) << "Open table";
-
-  auto istream = arrow::io::MemoryMappedFile
-    ::Open(args[0], arrow::io::FileMode::READ)
-    .ValueOrDie();
-
-  auto reader = arrow::ipc::RecordBatchFileReader
-      ::Open(istream, arrow::ipc::IpcReadOptions{})
-      .ValueOrDie();
-
-  auto async_batch_gen = reader->GetRecordBatchGenerator(
-    /*coalesce = */ false,
-    *plan->query_context()->io_context())
-    .ValueOrDie();
-
-  auto to_exec_batch = [=]() {
-    return async_batch_gen()
-      .Then([](const std::shared_ptr<arrow::RecordBatch> &batch)
-        -> std::optional<cp::ExecBatch>
-      {
-        if (batch == NULLPTR)
-          return std::nullopt;
-        else
-          return std::optional<cp::ExecBatch>(cp::ExecBatch(*batch));
-      });
-  };
-
-  uint64_t num_rows = (reader->num_record_batches() - 1) * LRN_ROWS_PER_CHUNK
-    + reader->ReadRecordBatch(reader->num_record_batches() - 1).ValueOrDie()->num_rows();
-  LOG(INFO) << "#rows: " << num_rows;
-  LOG(INFO) << "#batches " << reader->num_record_batches();
-
-  uint32_t num_partitions = 32;
-  float config_c = options[OPT_PTHASH_C].as<float>();
-  uint32_t num_buckets =
-    std::ceil((config_c * num_rows) / std::log2(num_rows));
-
-  ds::FileSystemDatasetWriteOptions write_options;
-  write_options.existing_data_behavior = ds::ExistingDataBehavior::kDeleteMatchingPartitions;
-  write_options.filesystem = std::make_shared<arrow::fs::LocalFileSystem>();
-  write_options.base_dir = "parts/";
-  write_options.file_write_options = std::make_shared<CountingIpcFileFormat>()
-      ->DefaultWriteOptions();
-  write_options.partitioning = std::make_shared<ds::FilenamePartitioning>(
-    arrow::schema({arrow::field("partition", arrow::uint16())}));
-  write_options.basename_template = "pn.{i}.arrow";
-  write_options.max_partitions = num_partitions;
-  //write_options.max_rows_per_group = LRN_ROWS_PER_CHUNK;
-
-  LOG(INFO) << "Build plan";
-  cp::Declaration::Sequence({
-    {"source", cp::SourceNodeOptions{reader->schema(), to_exec_batch}},
-    {"project", cp::ProjectNodeOptions{
-      {cp::call("x_pthash_partition", {
-          cp::call("shift_right", {
-            cp::field_ref("pn_bits"),
-            cp::literal(UINT64_C(30))
-          })
-        }, std::make_shared<BucketerOptions>(num_buckets, num_partitions)),
-       cp::field_ref("pn_bits"),
-       cp::field_ref("rn_bits")},
-      {"partition", "pn_bits", "rn_bits"}
-    }},
-    {"write", ds::WriteNodeOptions{write_options}},
-  }).AddToPlan(plan.get())
-    .ValueOrDie();
-
-  LOG(INFO) << "Validate plan";
-  ARROW_CHECK_OK(plan->Validate());
-
-  LOG(INFO) << "Running...";
-  //ARROW_CHECK_OK(plan->StartProducing());
-  plan->StartProducing();
-  plan->finished().result()
-    .ValueOrDie();
-
-  LOG(INFO) << "Finished plan";
-}
 
 void BuildPTHash(const po::variables_map& options,
                  const std::vector<std::string> &args)
@@ -379,30 +221,27 @@ void PermuteHash(const po::variables_map& options,
   ARROW_CHECK_OK(table_writer->Close());
 }
 
-void Query(const po::variables_map& options,
-           const std::vector<std::string> &args)
+arrow::Status Query(const po::variables_map& options,
+                    const std::vector<std::string> &args)
 {
-  CHECK_GE(args.size(), 3u);
+  if (args.size() != 3u)
+    throw folly::ProgramExit(1, "3 arguments expected");
 
   std::shared_ptr<arrow::io::RandomAccessFile> ym_file;
   std::shared_ptr<arrow::ipc::RecordBatchFileReader> ym_reader;
 
   if (options.count("youmail")) {
-    ym_file = arrow::io::ReadableFile::Open(options["youmail"].as<std::string>())
-      .ValueOrDie();
-    ym_reader = arrow::ipc::RecordBatchFileReader
-      ::Open(ym_file, arrow::ipc::IpcReadOptions{})
-      .ValueOrDie();
+    ARROW_ASSIGN_OR_RAISE(ym_file, arrow::io::ReadableFile
+                          ::Open(options["youmail"].as<std::string>()));
+    ARROW_ASSIGN_OR_RAISE(ym_reader, arrow::ipc::RecordBatchFileReader
+                          ::Open(ym_file, arrow::ipc::IpcReadOptions{}));
   }
 
-  std::shared_ptr<arrow::io::RandomAccessFile> lrn_file;
-  std::shared_ptr<arrow::ipc::RecordBatchFileReader> lrn_reader;
-
-  lrn_file = arrow::io::ReadableFile::Open(args[0])
-    .ValueOrDie();
-  lrn_reader = arrow::ipc::RecordBatchFileReader
-    ::Open(lrn_file, arrow::ipc::IpcReadOptions{})
-    .ValueOrDie();
+  ARROW_ASSIGN_OR_RAISE(auto lrn_file, arrow::io::ReadableFile
+                        ::Open(args[0]));
+  ARROW_ASSIGN_OR_RAISE(auto lrn_reader, arrow::ipc::RecordBatchFileReader
+                        ::Open(lrn_file, arrow::ipc::IpcReadOptions{
+                          }));
 
   LOG(INFO) << "reading pthash...";
   pthash128_t phf;
@@ -415,8 +254,7 @@ void Query(const po::variables_map& options,
     uint64_t chunk = row_index / LRN_ROWS_PER_CHUNK;
     uint64_t pos = row_index % LRN_ROWS_PER_CHUNK;
 
-    auto lrn = lrn_reader->ReadRecordBatch(chunk)
-      .ValueOrDie();
+    ARROW_ASSIGN_OR_RAISE(auto lrn, lrn_reader->ReadRecordBatch(chunk));
     auto pn_column = std::dynamic_pointer_cast<arrow::UInt64Array>(lrn->column(0));
     auto rn_column = std::dynamic_pointer_cast<arrow::UInt64Array>(lrn->column(1));
 
@@ -452,8 +290,7 @@ void Query(const po::variables_map& options,
         uint64_t ychunk = ym_id / YM_ROWS_PER_CHUNK;
         uint64_t ypos = ym_id % YM_ROWS_PER_CHUNK;
 
-        auto ym = ym_reader->ReadRecordBatch(ychunk)
-          .ValueOrDie();
+        ARROW_ASSIGN_OR_RAISE(auto ym, ym_reader->ReadRecordBatch(ychunk));
         auto c_spam_score  = std::static_pointer_cast<arrow::FloatArray>(ym->column(0));
         auto c_fraud_prob  = std::static_pointer_cast<arrow::FloatArray>(ym->column(1));
         auto c_unlawful_prob = std::static_pointer_cast<arrow::FloatArray>(ym->column(2));
@@ -474,32 +311,34 @@ void Query(const po::variables_map& options,
 
     std::cout << std::endl;
   }
+
+  return arrow::Status::OK();
 }
 
-void Metadata(const po::variables_map& options,
-              const std::vector<std::string> &args)
+arrow::Status Metadata(const po::variables_map& options,
+                       const std::vector<std::string> &args)
 {
-  auto file = arrow::io::ReadableFile::Open(args[0])
-    .ValueOrDie();
-  auto reader = arrow::ipc::RecordBatchFileReader
-    ::Open(file, arrow::ipc::IpcReadOptions{})
-    .ValueOrDie();
-  for (const auto& kv : reader->metadata()->sorted_pairs()) {
-    std::cout << kv.first << ": " << kv.second << std::endl;
-  }
+  ARROW_ASSIGN_OR_RAISE(auto file, arrow::io::ReadableFile
+                        ::Open(args[0]));
+  ARROW_ASSIGN_OR_RAISE(auto reader, arrow::ipc::RecordBatchFileReader
+                        ::Open(file, arrow::ipc::IpcReadOptions{
+                          }));
+
+  std::cout << reader->metadata()->ToString() << std::endl;
+
+  return arrow::Status::OK();
 }
 
-// template<class Entrypoint>
-// folly::NestedCommandLineApp::Command ArrowCommand(const Entrypoint &entrypoint)
-// {
-//   return [&](const po::variables_map& options,
-//              const std::vector<std::string> &args)
-//   {
-//     arrow::Status st = entrypoint(options);
-//     if (!st.ok())
-//       throw folly::ProgramExit(1, st.message());
-//   };
-// }
+template<class Entrypoint>
+folly::NestedCommandLineApp::Command ArrowCommand(const Entrypoint &entrypoint)
+{
+  return [&](const po::variables_map& options, const std::vector<std::string> &args)
+  {
+    arrow::Status st = entrypoint(options, args);
+    if (!st.ok())
+      throw folly::ProgramExit(1, st.message());
+  };
+}
 
 int main(int argc, const char* argv[]) {
   using namespace std::placeholders;
@@ -508,6 +347,9 @@ int main(int argc, const char* argv[]) {
   google::InitGoogleLogging(argv[0]);
   google::InstallFailureSignalHandler();
 
+  RegisterCustomFunctions(arrow::compute::GetFunctionRegistry());
+  arrow::dataset::internal::Initialize();
+
   folly::NestedCommandLineApp app{argv[0], "0.9", "", "", nullptr};
   app.addGFlags(folly::ProgramOptionsStyle::GNU);
   FLAGS_logtostderr = 1;
@@ -515,11 +357,8 @@ int main(int argc, const char* argv[]) {
   PnOrderedJoinOptions pn_ordered_join;
   pn_ordered_join.AddCommand(app);
 
-  app.addCommand(
-      "pthash-partition", "",
-      "",
-      "",
-      PartitionByBucket);
+  PtHashPartitionerOptions pthash_partitioner;
+  pthash_partitioner.AddCommand(app);
 
   auto& pthash_pn_cmd = app.addCommand(
       "pthash-build", "arrow_table_path",
@@ -553,7 +392,7 @@ int main(int argc, const char* argv[]) {
       "query", "lrn_table_path pthash key",
       "Query PN data for number",
       "",
-      Query);
+      ArrowCommand(Query));
 
   query_cmd.add_options()
     ("youmail",
@@ -568,7 +407,7 @@ int main(int argc, const char* argv[]) {
     "metadata", "arrow_table_apth",
     "Print table metadata",
     "",
-    Metadata);
+    ArrowCommand(Metadata));
 
   return app.run(argc, argv);
 }

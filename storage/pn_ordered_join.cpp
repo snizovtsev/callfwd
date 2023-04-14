@@ -38,7 +38,7 @@ std::shared_ptr<arrow::Schema> PnOrderedJoin::rn_schema() {
 std::unique_ptr<PnOrderedJoin> PnOrderedJoin::Make(arrow::MemoryPool* memory_pool)
 {
   auto cmd = std::make_unique<PnOrderedJoin>();
-  cmd->memory_pool = memory_pool;
+  cmd->memory_pool = memory_pool ?: arrow::default_memory_pool();
   return cmd;
 }
 
@@ -244,7 +244,6 @@ Status PnOrderedJoin::FlushRnData() {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-//
 
 static void Main(PnOrderedJoinOptions& options,
                  const po::variables_map& vm,
