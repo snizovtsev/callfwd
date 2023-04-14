@@ -308,7 +308,7 @@ Status PTHashPartitioner::Exec(cp::KernelContext* ctx, const cp::ExecSpan& batch
                                cp::ExecResult *out) {
   auto& state = checked_cast<PTHashPartitioner&>(*ctx->state());
   const uint64_t* pn = batch[0].array.GetValues<uint64_t>(1);
-  uint16_t* partition = out->array_span()->GetValues<uint16_t>(1);
+  uint16_t* partition = out->array_span_mutable()->GetValues<uint16_t>(1);
 
   ARROW_LOG(DEBUG) << "PTHash partitioner job " << &state << ": "
                    << pn[0] << " to " << pn[batch.length-1]

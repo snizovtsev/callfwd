@@ -25,11 +25,11 @@ arrow_defs = [
     "ARROW_DATASET",
     "ARROW_FILESYSTEM",
     "ARROW_IPC",
-    "ARROW_JSON",
     "ARROW_USE_NATIVE_INT128",
 ]
 
 arrow_undefs = [
+    "ARROW_JSON",
     "ARROW_FLIGHT",
     "ARROW_FLIGHT_SQL",
     "ARROW_JEMALLOC",
@@ -58,9 +58,12 @@ cmake_configure_file(
 glob_exclude_files = [
     "**/benchmark_*",
     "cpp/src/arrow/adapters/**",
+    "cpp/src/arrow/extension/**",
+    "cpp/src/arrow/acero/test_nodes.*",
     "cpp/src/arrow/compute/exec/test_nodes.*",
     "cpp/src/arrow/dataset/file_orc*",
     "cpp/src/arrow/dataset/file_parquet*",
+    "cpp/src/arrow/dataset/file_json*",
     "cpp/src/arrow/engine/substrait/**",
     "cpp/src/arrow/filesystem/gcsfs*",
     "cpp/src/arrow/filesystem/s3fs*", # XXX
@@ -82,7 +85,7 @@ glob_hdrs = glob([
     "cpp/src/arrow/vendored/uriparser/*.h",
 ], exclude = glob_exclude_files + [
     "**/*_test.h",
-    "**/*test_util.h",
+    "**/*test_util*.h",
 ])
 
 glob_srcs = glob([
@@ -93,9 +96,11 @@ glob_srcs = glob([
 ], exclude = glob_exclude_files + [
     "**/*_test.cc",
     "**/*_benchmark.cc",
-    "**/*test_util.cc",
+    "**/*test_util*.cc",
     "**/generate_*fuzz_corpus.cc",
     "**/*_fuzz.cc",
+    "**/try_compile/*",
+    "**/try_compile_*.cc",
     "cpp/src/arrow/flight/sql/test_*_cli.cc",
     "cpp/src/arrow/flight/integration_tests/*",
     "cpp/src/arrow/ipc/json_simple.cc",
