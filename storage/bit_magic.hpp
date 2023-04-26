@@ -1,6 +1,7 @@
 #ifndef HIPERF_LRN_BITMAGIC_H
 #define HIPERF_LRN_BITMAGIC_H
 
+#include <utility>
 #include <cstdint>
 
 //
@@ -22,7 +23,7 @@ static inline uint64_t fmix64(uint64_t k) {
   return k;
 }
 
-static inline uint64_t murmur3_64(uint64_t val, uint64_t seed) {
+static inline std::pair<uint64_t, uint64_t> murmur3_128(uint64_t val, uint64_t seed) {
   uint64_t h1 = seed;
   uint64_t h2 = seed;
 
@@ -48,9 +49,13 @@ static inline uint64_t murmur3_64(uint64_t val, uint64_t seed) {
   h2 = fmix64(h2);
 
   h1 += h2;
-  // h2 += h1;
+  h2 += h1;
 
-  return h1;
+  return std::make_pair(h1, h2);
+}
+
+static inline uint64_t murmur3_64(uint64_t val, uint64_t seed) {
+  return murmur3_128(val, seed).first;
 }
 
 // fastmod library

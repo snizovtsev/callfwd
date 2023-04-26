@@ -1,144 +1,15 @@
 #include "compute_kernels.hpp"
-
-#include "bit_magic.hpp"
+#include "pthash_bucketer.hpp"
 
 #include <arrow/api.h>
 #include <arrow/compute/api.h>
 #include <arrow/compute/function_internal.h>
 #include <arrow/compute/kernel.h>
-#include <folly/Likely.h>
-#include <folly/lang/Hint.h>
 #include <arrow/util/logging.h>
 
+namespace cp = arrow::compute;
 using arrow::Result;
 using arrow::Status;
-namespace cp = arrow::compute;
-
-namespace {
-
-struct SkewBucketer {
-  explicit SkewBucketer(uint32_t num_buckets);
-
-  /* Returns an integer in range [-sparse_buckets .. dense_buckets) */
-  int32_t operator()(uint64_t hashed_key) const;
-
-  /* Return an integer in range [0 .. num_buckets) */
-  uint32_t to_index(int32_t bucket) const {
-    return (bucket >= 0) ? bucket : (dense_buckets - bucket - 1);
-  }
-
-  /* Equals to construction time parameter. */
-  uint32_t num_buckets() const {
-    return dense_buckets + sparse_buckets;
-  }
-
-  uint32_t dense_buckets;
-  uint32_t sparse_buckets;
-  __uint128_t M_dense_buckets;
-  __uint128_t M_sparse_buckets;
-};
-
-// TODO: adjust to primes?
-SkewBucketer::SkewBucketer(uint32_t num_buckets)
-    : dense_buckets(0.3 * num_buckets)
-    , sparse_buckets(num_buckets - dense_buckets)
-    , M_dense_buckets(fastmod_computeM_u64(dense_buckets))
-    , M_sparse_buckets(fastmod_computeM_u64(sparse_buckets))
-{}
-
-int32_t SkewBucketer::operator()(uint64_t hashed_key) const {
-  static constexpr uint64_t threshold = 0.6 * UINT64_MAX;
-  int32_t ret;
-  if (FOLLY_BUILTIN_EXPECT_WITH_PROBABILITY(hashed_key < threshold, 1, 0.6)) {
-    ret = fastmod_u64(hashed_key, M_dense_buckets, dense_buckets);
-    folly::compiler_may_unsafely_assume(ret >= 0);
-  } else {
-    ret = -1 - fastmod_u64(hashed_key, M_sparse_buckets, sparse_buckets);
-    folly::compiler_may_unsafely_assume(ret < 0);
-  }
-  return ret;
-}
-
-template<class IntegerA, class IntegerB>
-IntegerA DivideAndRoundUp(IntegerA a, IntegerB b) {
-  return (a + b - 1) / b;
-}
-
-struct BucketPartitioner {
-  explicit BucketPartitioner(const SkewBucketer& bucketer,
-                             uint16_t num_partitions);
-  explicit BucketPartitioner(uint32_t dense_block,
-                             uint32_t sparse_block);
-
-  /* Returns a number in range [0, num_partitions) */
-  uint16_t operator()(int32_t bucket) const;
-
-  uint64_t M_dense_block;
-  uint64_t M_sparse_block;
-};
-
-BucketPartitioner::BucketPartitioner(const SkewBucketer& bucketer,
-                                     uint16_t num_partitions)
-  : BucketPartitioner(DivideAndRoundUp(bucketer.dense_buckets, num_partitions),
-                      DivideAndRoundUp(bucketer.sparse_buckets, num_partitions))
-{}
-
-BucketPartitioner::BucketPartitioner(uint32_t dense_block, uint32_t sparse_block)
-    : M_dense_block(fastmod_computeM_u32(dense_block))
-    , M_sparse_block(fastmod_computeM_u32(sparse_block))
-{}
-
-uint16_t BucketPartitioner::operator()(int32_t bucket) const {
-  if (bucket >= 0) {
-    return fastdiv_u32(bucket, M_dense_block);
-  } else {
-    return fastdiv_u32(-(bucket + 1), M_sparse_block);
-  }
-}
-
-struct LocalBucketer {
-  explicit LocalBucketer(const SkewBucketer& bucketer,
-                         uint16_t num_partitions,
-                         int32_t sample_bucket);
-
-  explicit LocalBucketer(uint32_t dense_buckets, uint32_t sparse_buckets,
-                         uint16_t num_partitions, uint16_t partition);
-
-  /* Returns a number in range [0, DivideAndRoundUp(num_buckets, num_partitions)] */
-  uint32_t operator()(int32_t bucket) const;
-
-  uint32_t dense_offset;
-  uint32_t sparse_offset;
-};
-
-LocalBucketer::LocalBucketer(const SkewBucketer& bucketer,
-                             uint16_t num_partitions,
-                             int32_t sample_bucket)
-    : LocalBucketer(bucketer.dense_buckets, bucketer.sparse_buckets,
-                    num_partitions,
-                    BucketPartitioner(bucketer, num_partitions)(sample_bucket))
-{}
-
-LocalBucketer::LocalBucketer(uint32_t dense_buckets, uint32_t sparse_buckets,
-                             uint16_t num_partitions, uint16_t partition)
-    : dense_offset(DivideAndRoundUp(dense_buckets, num_partitions) * partition)
-    , sparse_offset(DivideAndRoundUp(sparse_buckets, num_partitions) * partition)
-{}
-
-uint32_t LocalBucketer::operator()(int32_t bucket) const {
-  uint32_t ret;
-  if (bucket >= 0) {
-    ret = bucket - dense_offset;
-  } else {
-    ret = -(bucket + 1) - sparse_offset;
-  }
-  return ret;
-}
-
-////////////////////////////////////////////////////////////////////////////////
-// Arrow Compute plug-in
-////////////////////////////////////////////////////////////////////////////////
-
 using arrow::internal::DataMember;
 using arrow::internal::checked_cast;
 using arrow::internal::checked_pointer_cast;
@@ -149,8 +20,6 @@ static auto kBucketerOptionsType =
         DataMember("num_buckets", &BucketerOptions::num_buckets),
         DataMember("num_partitions", &BucketerOptions::num_partitions)
     );
-
-} // anonymous namespace
 
 BucketerOptions::BucketerOptions(uint32_t num_buckets,
                                  uint32_t num_partitions,
@@ -164,11 +33,9 @@ constexpr char BucketerOptions::kTypeName[];
 
 namespace {
 
-// TODO: derive bucket size type (uint32_t) from output arg
+// TODO: derive bucket size type (uint16_t) from output arg?
 struct BucketCounter final : cp::KernelState {
-  static Result<std::unique_ptr<cp::KernelState>>
-  Init(cp::KernelContext* ctx, const cp::KernelInitArgs& args);
-
+  static Result<std::unique_ptr<cp::KernelState>> Init(cp::KernelContext* ctx, const cp::KernelInitArgs& args);
   static Status Consume(cp::KernelContext*, const cp::ExecSpan&);
   static Status Merge(cp::KernelContext*, cp::KernelState&&, cp::KernelState*);
   static Status Finalize(cp::KernelContext*, arrow::Datum*);

@@ -26,6 +26,7 @@ struct PtHashPartitionerOptions {
   void Store(const boost::program_options::variables_map& options,
              const std::vector<std::string>& args);
 
+  uint64_t hash_seed;
   uint32_t num_partitions;
   uint32_t num_buckets;
   std::string source_path;
@@ -43,7 +44,7 @@ struct PtHashPartitioner
     arrow::MemoryPool* memory_pool = nullptr);
 
   arrow::Status Reset(const PtHashPartitionerOptions &options);
-  arrow::Status Drain(const PtHashPartitionerOptions &options);
+  arrow::Status Drain();
 };
 
 #endif // CALLFWD_PTHASH_PARTITIONER_H

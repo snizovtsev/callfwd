@@ -1,6 +1,7 @@
 #ifndef CALLFWD_PTHASH_PARTITIONER_INTERNAL_H_
 #define CALLFWD_PTHASH_PARTITIONER_INTERNAL_H_
 
+#include "compute_kernels.hpp"
 #include <arrow/api.h>
 #include <arrow/io/api.h>
 #include <arrow/ipc/api.h>
@@ -61,6 +62,7 @@ struct PtHashPartitionerPriv {
   std::shared_ptr<arrow::ipc::RecordBatchFileReader> file_reader;
   arrow::AsyncGenerator<std::shared_ptr<arrow::RecordBatch>> batch_generator;
   arrow::dataset::FileSystemDatasetWriteOptions write_options;
+  std::shared_ptr<BucketerOptions> bucketer_options;
 };
 
 #endif // CALLFWD_PTHASH_PARTITIONER_INTERNAL_H_

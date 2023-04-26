@@ -10,6 +10,7 @@
 #include <arrow/acero/query_context.h>
 #include <folly/experimental/NestedCommandLineApp.h>
 #include <folly/Conv.h>
+#include <memory>
 
 namespace po = boost::program_options;
 namespace cp = arrow::compute;
@@ -59,6 +60,35 @@ Status PtHashPartitioner::Reset(const PtHashPartitionerOptions &options)
   io_context = exec_plan->query_context()->io_context();
   ARROW_ASSIGN_OR_RAISE(batch_generator, file_reader->GetRecordBatchGenerator(
                           /*coalesce = */ false, *io_context));
+
+  //write_options.existing_data_behavior = ds::ExistingDataBehavior::kDeleteMatchingPartitions;
+  write_options.existing_data_behavior = ds::ExistingDataBehavior::kOverwriteOrIgnore;
+  write_options.filesystem = std::make_shared<arrow::fs::LocalFileSystem>();
+  write_options.base_dir = options.output_dir;
+  write_options.basename_template = options.name_template;
+  write_options.max_partitions = options.num_partitions;
+  write_options.file_write_options = std::make_shared<CountingIpcFileFormat>()
+      ->DefaultWriteOptions();
+  write_options.partitioning = std::make_shared<ds::FilenamePartitioning>(
+    arrow::schema({arrow::field("partition", arrow::uint16())}));
+  //write_options.max_rows_per_group = LRN_ROWS_PER_CHUNK;
+
+  bucketer_options = std::make_shared<BucketerOptions>(
+    options.num_buckets,
+    options.num_partitions,
+    options.hash_seed);
+
+  auto write_opts = std::dynamic_pointer_cast<ds::IpcFileWriteOptions>(
+    write_options.file_write_options);
+  write_opts->metadata = arrow::KeyValueMetadata::Make(
+      {
+        "x_pthash_seed",
+        "x_pthash_buckets"
+      }, {
+        std::to_string(options.hash_seed),
+        std::to_string(options.num_buckets),
+      }
+    );
   return Status::OK();
 }
 
@@ -78,46 +108,32 @@ AsyncExecBatch PtHashPartitionerPriv::GenExecBatch() const
   return batch_generator().Then(ToExecBatch{});
 }
 
-Status PtHashPartitioner::Drain(const PtHashPartitionerOptions &options)
+Status PtHashPartitioner::Drain()
 {
-  //write_options.existing_data_behavior = ds::ExistingDataBehavior::kDeleteMatchingPartitions;
-  write_options.existing_data_behavior = ds::ExistingDataBehavior::kOverwriteOrIgnore;
-  write_options.filesystem = std::make_shared<arrow::fs::LocalFileSystem>();
-  write_options.base_dir = options.output_dir;
-  write_options.basename_template = options.name_template;
-  write_options.max_partitions = options.num_partitions;
-  write_options.file_write_options = std::make_shared<CountingIpcFileFormat>()
-      ->DefaultWriteOptions();
-  write_options.partitioning = std::make_shared<ds::FilenamePartitioning>(
-    arrow::schema({arrow::field("partition", arrow::uint16())}));
-  //write_options.max_rows_per_group = LRN_ROWS_PER_CHUNK;
-
   ARROW_LOG(INFO) << "Build a plan";
 
   acero::Declaration source
-    {"source", acero::SourceNodeOptions{
-        file_reader->schema(),
-        std::bind(&PtHashPartitionerPriv::GenExecBatch,
-                  static_cast<PtHashPartitionerPriv*>(this))
-      }};
+      {"source", acero::SourceNodeOptions{
+          file_reader->schema(),
+          std::bind(&PtHashPartitionerPriv::GenExecBatch,
+                    static_cast<PtHashPartitionerPriv*>(this))
+        }};
 
   acero::Declaration project
-    {"project", acero::ProjectNodeOptions{
-      {cp::call("x_pthash_partition", {
-          cp::call("shift_right", {
-            cp::field_ref("pn_bits"),
-            cp::literal<uint64_t>(LRN_BITS_PN_SHIFT)
-          })
-        }, std::make_shared<BucketerOptions>(
-            options.num_buckets,
-            options.num_partitions)),
-       cp::field_ref("pn_bits"),
-       cp::field_ref("rn_bits")},
-      {"partition", "pn_bits", "rn_bits"}
-    }};
+      {"project", acero::ProjectNodeOptions{
+          {cp::call("x_pthash_partition", {
+                cp::call("shift_right", {
+                    cp::field_ref("pn_bits"),
+                    cp::literal<uint64_t>(LRN_BITS_PN_SHIFT)
+                  })
+              }, bucketer_options),
+           cp::field_ref("pn_bits"),
+           cp::field_ref("rn_bits")},
+          {"partition", "pn_bits", "rn_bits"}
+        }};
 
   acero::Declaration sink
-    {"write", ds::WriteNodeOptions{write_options}};
+      {"write", ds::WriteNodeOptions{write_options}};
 
   ARROW_RETURN_NOT_OK(acero::Declaration::Sequence({source, project, sink})
                       .AddToPlan(exec_plan.get()));
@@ -174,7 +190,7 @@ static void Main(PtHashPartitionerOptions& options,
   if (!st.ok())
     throw folly::ProgramExit(1, "error: " + st.message());
 
-  st = command.Drain(options);
+  st = command.Drain();
   if (!st.ok())
     throw folly::ProgramExit(2, "error: " + st.message());
 }
@@ -199,9 +215,10 @@ void PtHashPartitionerOptions::AddCommand(folly::NestedCommandLineApp &app,
 void PtHashPartitionerOptions::BindToOptions(po::options_description& description)
 {
   description.add_options()
+      ("seed,s",
+       po::value(&hash_seed)->default_value(424242))
       ("partitions,p",
-       po::value(&num_partitions)->default_value(128),
-       "Number of partitions")
+       po::value(&num_partitions)->default_value(128))
       ("buckets,b",
        po::value(&num_buckets)->required())
       ("output-dir,O",
