@@ -109,6 +109,7 @@ cc_library(
     ],
     hdrs = glob_hdrs + ["folly/folly-config.h"],
     srcs = glob_srcs,
+    linkopts = ["-levent"],
     deps = [
         "@boost//:algorithm",
         "@boost//:context",

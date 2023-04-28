@@ -38,8 +38,8 @@ git_repository(
 git_repository(
     name = "com_github_facebook_folly",
     remote = "https://github.com/facebook/folly",
-    commit = "1c74accaed8e224a7867404822ab58acb70b5c8a", # v2023.02.13.00
-    shallow_since = "1676136354 -0800",
+    commit = "e3b9b1e936e1d27908a18ee27c62274db87ca5ab", # v2023.04.24.00
+    shallow_since = "1682123835 -0700",
     build_file = "//third_party/folly:recipe.bzl",
 )
 
@@ -100,6 +100,31 @@ git_repository(
     name = "com_grail_bazel_compdb",
     remote = "https://github.com/grailbio/bazel-compilation-database",
     commit = "765d43e7e0f8f28e07a48609c79407e7c133a6f8", # v0.5.2
+    shallow_since = "1631243742 +0000",
+)
+
+git_repository(
+    name = "com_github_facebook_proxygen",
+    remote = "https://github.com/facebook/proxygen",
+    commit = "c677c88c2566d3aec0f08769fd5d7fde8d9deab7", # v2023.04.24.00
+    shallow_since = "1682220536 -0700",
+    build_file = "//third_party/proxygen:recipe.bzl",
+)
+
+git_repository(
+    name = "com_github_facebookincubator_fizz",
+    remote = "https://github.com/facebookincubator/fizz",
+    commit = "d7bcaa8d7272ba152d80e2ce5e0dd1f3a030995c", # v2023.04.24.00
+    shallow_since = "1682128324 -0700",
+    build_file = "//third_party/fizz:recipe.bzl",
+)
+
+git_repository(
+    name = "com_github_facebook_wangle",
+    remote = "https://github.com/facebook/wangle",
+    commit = "379c9092f06420d010509b8f33bcdcdf75e00d0c", # v2023.04.24.00
+    shallow_since = "1682194417 -0700",
+    build_file = "//third_party/wangle:recipe.bzl",
 )
 
 load("@com_grail_bazel_compdb//:deps.bzl", "bazel_compdb_deps")
