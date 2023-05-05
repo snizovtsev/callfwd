@@ -3,6 +3,7 @@
 #include "lrn_schema.hpp"
 #include "compute_kernels.hpp"
 
+#include <arrow/compute/expression.h>
 #include <arrow/filesystem/api.h>
 //#include <arrow/compute/exec/exec_plan.h>
 //#include <arrow/compute/exec/query_context.h>
@@ -35,7 +36,7 @@ CountingIpcFileFormat::MakeWriter(std::shared_ptr<arrow::io::OutputStream> outpu
 
   ARROW_ASSIGN_OR_RAISE(auto dataset_writer, arrow::dataset::IpcFileFormat
       ::MakeWriter(std::move(output), std::move(schema),
-                    std::move(cloned_options), std::move(file_locator)));
+                   std::move(cloned_options), std::move(file_locator)));
 
   return std::make_shared<CountingFileWriter>(std::move(dataset_writer),
                                               std::move(cloned_metadata));
@@ -59,10 +60,10 @@ Status PtHashPartitioner::Reset(const PtHashPartitionerOptions &options)
   ARROW_ASSIGN_OR_RAISE(exec_plan, acero::ExecPlan::Make(exec_context));
   io_context = exec_plan->query_context()->io_context();
   ARROW_ASSIGN_OR_RAISE(batch_generator, file_reader->GetRecordBatchGenerator(
-                          /*coalesce = */ false, *io_context));
+                          /*coalesce = */ true, *io_context));
 
   //write_options.existing_data_behavior = ds::ExistingDataBehavior::kDeleteMatchingPartitions;
-  write_options.existing_data_behavior = ds::ExistingDataBehavior::kOverwriteOrIgnore;
+  write_options.existing_data_behavior = ds::ExistingDataBehavior::kError;
   write_options.filesystem = std::make_shared<arrow::fs::LocalFileSystem>();
   write_options.base_dir = options.output_dir;
   write_options.basename_template = options.name_template;
@@ -74,32 +75,30 @@ Status PtHashPartitioner::Reset(const PtHashPartitionerOptions &options)
   //write_options.max_rows_per_group = LRN_ROWS_PER_CHUNK;
 
   bucketer_options = std::make_shared<BucketerOptions>(
-    options.num_buckets,
     options.num_partitions,
     options.hash_seed);
 
   auto write_opts = std::dynamic_pointer_cast<ds::IpcFileWriteOptions>(
     write_options.file_write_options);
-  write_opts->metadata = arrow::KeyValueMetadata::Make(
-      {
+  write_opts->metadata = arrow::KeyValueMetadata::Make({
         "x_pthash_seed",
-        "x_pthash_buckets"
       }, {
         std::to_string(options.hash_seed),
-        std::to_string(options.num_buckets),
-      }
-    );
+      });
   return Status::OK();
 }
 
 struct ToExecBatch {
-  std::optional<arrow::compute::ExecBatch> operator()(
+  std::optional<cp::ExecBatch> operator()(
       const std::shared_ptr<arrow::RecordBatch> &batch) const
   {
-    if (batch == NULLPTR)
+    if (batch == NULLPTR) {
+      ARROW_LOG(DEBUG) << "NULL BATCH";
       return std::nullopt;
-    else
-      return std::optional<cp::ExecBatch>(cp::ExecBatch(*batch));
+    } else {
+      ARROW_LOG(DEBUG) << "batch: " << batch->num_rows() << " rows";
+      return std::make_optional(cp::ExecBatch(*batch));
+    }
   }
 };
 
@@ -107,6 +106,23 @@ AsyncExecBatch PtHashPartitionerPriv::GenExecBatch() const
 {
   return batch_generator().Then(ToExecBatch{});
 }
+
+struct CustomSinkNodeConsumer : acero::SinkNodeConsumer {
+  Status Init(const std::shared_ptr<arrow::Schema>& schema,
+              acero::BackpressureControl* backpressure_control, acero::ExecPlan* plan) override {
+    return Status::OK();
+  }
+
+  arrow::Status Consume(cp::ExecBatch batch) override {
+    ARROW_LOG(INFO) << batch.ToString();
+    return arrow::Status::OK();
+  }
+
+  arrow::Future<> Finish() override {
+    ARROW_LOG(INFO) << "FINISH";
+    return arrow::Future<>::MakeFinished();
+  }
+};
 
 Status PtHashPartitioner::Drain()
 {
@@ -119,14 +135,16 @@ Status PtHashPartitioner::Drain()
                     static_cast<PtHashPartitionerPriv*>(this))
         }};
 
+  arrow::Expression key_expr;
+
+  key_expr = cp::call("shift_right", {
+    cp::field_ref("pn_bits"),
+    cp::literal<uint64_t>(LRN_BITS_PN_SHIFT)
+  });
+
   acero::Declaration project
       {"project", acero::ProjectNodeOptions{
-          {cp::call("x_pthash_partition", {
-                cp::call("shift_right", {
-                    cp::field_ref("pn_bits"),
-                    cp::literal<uint64_t>(LRN_BITS_PN_SHIFT)
-                  })
-              }, bucketer_options),
+          {cp::call("x_pthash_partition", {key_expr}, bucketer_options),
            cp::field_ref("pn_bits"),
            cp::field_ref("rn_bits")},
           {"partition", "pn_bits", "rn_bits"}
@@ -134,6 +152,9 @@ Status PtHashPartitioner::Drain()
 
   acero::Declaration sink
       {"write", ds::WriteNodeOptions{write_options}};
+  //auto consumer = std::make_shared<CustomSinkNodeConsumer>();
+  //acero::Declaration sink
+  //    {"consuming_sink", acero::ConsumingSinkNodeOptions{consumer}};
 
   ARROW_RETURN_NOT_OK(acero::Declaration::Sequence({source, project, sink})
                       .AddToPlan(exec_plan.get()));
@@ -145,35 +166,6 @@ Status PtHashPartitioner::Drain()
 
   return exec_plan->finished().status();
 }
-
-  // std::shared_ptr<const arrow::KeyValueMetadata> metadata = file_reader->metadata();
-  // int64_t num_rows = folly::tryTo<int64_t>(
-  //     metadata->Get("num_rows").ValueOr("0")).value_or(0);
-  // if (!num_rows) {
-  //   ARROW_ASSIGN_OR_RAISE(num_rows, file_reader->CountRows());
-  // }
-
-  // ARROW_LOG(INFO) << "#rows: " << num_rows;
-  // ARROW_LOG(INFO) << "#batches " << file_reader->num_record_batches();
-
-  // uint32_t num_buckets =
-  //   std::ceil((config_c * num_rows) / std::log2(num_rows));
-
-  // ARROW_RETURN_NOT_OK(cp::Declaration::Sequence({
-  //   {"source", cp::SourceNodeOptions{reader->schema(), to_exec_batch}},
-  //   {"project", cp::ProjectNodeOptions{
-  //     {cp::call("x_pthash_partition", {
-  //         cp::call("shift_right", {
-  //           cp::field_ref("pn_bits"),
-  //           cp::literal<uint64_t>(LRN_BITS_PN_SHIFT)
-  //         })
-  //       }, std::make_shared<BucketerOptions>(num_buckets, num_partitions)),
-  //      cp::field_ref("pn_bits"),
-  //      cp::field_ref("rn_bits")},
-  //     {"partition", "pn_bits", "rn_bits"}
-  //   }},
-  //   {"write", ds::WriteNodeOptions{write_options}},
-  // }).AddToPlan(plan.get()));
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -205,8 +197,8 @@ void PtHashPartitionerOptions::AddCommand(folly::NestedCommandLineApp &app,
     command = default_command.get();
 
   po::options_description& options = app.addCommand(
-      "pthash-partitioner", "arrow_data",
-      "Partition database according to PTHash bucket",
+      "partition", "arrow_data",
+      "Split the data into partitions grouped by a hash of key",
       "\n",
       std::bind(&Main, std::ref(*this), _1, _2, std::ref(*command)));
   BindToOptions(options);
@@ -215,15 +207,14 @@ void PtHashPartitionerOptions::AddCommand(folly::NestedCommandLineApp &app,
 void PtHashPartitionerOptions::BindToOptions(po::options_description& description)
 {
   description.add_options()
+      // TODO: key expression
       ("seed,s",
        po::value(&hash_seed)->default_value(424242))
-      ("partitions,p",
-       po::value(&num_partitions)->default_value(128))
-      ("buckets,b",
-       po::value(&num_buckets)->required())
-      ("output-dir,O",
+      ("partitions,n",
+       po::value(&num_partitions)->default_value(64))
+      ("output-dir,o",
        po::value(&output_dir)->required())
-      ("name-template,T",
+      ("name-template,t",
        po::value(&name_template)->default_value("pn.{i}.arrow"));
 }
 

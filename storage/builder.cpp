@@ -20,6 +20,7 @@
 #include <arrow/util/logging.h>
 
 #include <folly/experimental/NestedCommandLineApp.h>
+#include <folly/Likely.h>
 
 #include <functional>
 #include <iostream>
@@ -86,9 +87,10 @@ arrow::Status PtHashWorker::ReadTable(std::shared_ptr<arrow::ipc::RecordBatchFil
   }
   ARROW_ASSIGN_OR_RAISE(table, arrow::Table::FromRecordBatches(reader->schema(), batches));
 
-  metadata = reader->metadata();
-  hash_seed = folly::to<uint64_t>(metadata->Get("x_pthash_seed").ValueOrDie());
-  num_buckets = folly::to<uint32_t>(metadata->Get("x_pthash_buckets").ValueOrDie());
+  metadata = reader->metadata()->Copy();
+  ARROW_ASSIGN_OR_RAISE(auto seed_str, metadata->Get("x_pthash_seed"));
+  hash_seed = folly::to<uint64_t>(seed_str);
+  //num_buckets = folly::to<uint32_t>(metadata->Get("x_pthash_buckets").ValueOrDie());
 
   return arrow::Status::OK();
 }
@@ -96,28 +98,22 @@ arrow::Status PtHashWorker::ReadTable(std::shared_ptr<arrow::ipc::RecordBatchFil
 arrow::Status PtHashWorker::Do(int64_t table_size, uint16_t num_partitions) {
   auto key_chunks = table->GetColumnByName("pn_bits")->chunks();
   SkewBucketer bucketer{num_buckets};
-  BucketPartitioner partitioner{bucketer, num_partitions};
-  int32_t sample_bucket =
-    bucketer(murmur3_64(key_chunks[0]->data()->GetValues<uint64_t>(1, 0)[0] >> LRN_BITS_PN_SHIFT, hash_seed));
-  LocalBucketer local_bucketer(bucketer, num_partitions, sample_bucket);
-  uint32_t local_buckets = DivideAndRoundUp(num_buckets, num_partitions);
-  uint32_t partition = partitioner(sample_bucket);
 
-  LOG(INFO) << "sample bucket: " << sample_bucket;
-  LOG(INFO) << "partition: " << partition;
-  LOG(INFO) << "dense offset: " << local_bucketer.dense_offset;
-  LOG(INFO) << "sparse offset: " << local_bucketer.sparse_offset;
-  LOG(INFO) << "table size: " << table_size;
+  //LOG(INFO) << "sample bucket: " << sample_bucket;
+  //LOG(INFO) << "partition: " << partition;
+  //LOG(INFO) << "dense offset: " << local_bucketer.dense_offset;
+  //LOG(INFO) << "sparse offset: " << local_bucketer.sparse_offset;
+  //LOG(INFO) << "table size: " << table_size;
 
   bucket_size.Reset();
   bucket_desc.Reset();
   table_offset.Reset();
   pilot.Reset();
 
-  ARROW_RETURN_NOT_OK(bucket_size.Append(local_buckets, 0));
-  ARROW_RETURN_NOT_OK(bucket_desc.Reserve(local_buckets));
-  ARROW_RETURN_NOT_OK(table_offset.Append(local_buckets, 0));
-  ARROW_RETURN_NOT_OK(pilot.Append(local_buckets, 0));
+  ARROW_RETURN_NOT_OK(bucket_size.Append(num_buckets, 0));
+  ARROW_RETURN_NOT_OK(bucket_desc.Reserve(num_buckets));
+  ARROW_RETURN_NOT_OK(table_offset.Append(num_buckets, 0));
+  ARROW_RETURN_NOT_OK(pilot.Append(num_buckets, 0));
 
   uint16_t *bucket_size_data = bucket_size.mutable_data();
   uint16_t *pilot_data = pilot.mutable_data();
@@ -128,20 +124,19 @@ arrow::Status PtHashWorker::Do(int64_t table_size, uint16_t num_partitions) {
     for (int64_t i = 0; i < chunk->length(); ++i) {
       uint64_t pn = pn_bits[i] >> LRN_BITS_PN_SHIFT;
       uint64_t h = murmur3_64(pn, hash_seed);
-      int32_t b = bucketer(h);
-      int32_t lb = local_bucketer(b);
-      bucket_size_data[lb]++;
+      uint32_t b = bucketer(h);
+      bucket_size_data[b]++;
     }
   }
 
   uint16_t mb = *std::max_element(bucket_size_data,
-                                  bucket_size_data + local_buckets);
+                                  bucket_size_data + num_buckets);
   LOG(INFO) << "max bucket: " << mb;
 
   int64_t row_offset = 0;
   for (size_t bs = mb; bs > 0; --bs) {
-    for (size_t lb = 0; lb < local_buckets; ++lb) {
-      if (/*likely*/bucket_size_data[lb] != bs)
+    for (size_t lb = 0; lb < num_buckets; ++lb) {
+      if (LIKELY(bucket_size_data[lb] != bs))
         continue;
       row_offset += bs;
       offset_data[lb] = row_offset;
@@ -149,7 +144,7 @@ arrow::Status PtHashWorker::Do(int64_t table_size, uint16_t num_partitions) {
     }
   }
   CHECK_EQ(row_offset, table->num_rows());
-  CHECK_LE(bucket_desc.length(), local_buckets);
+  CHECK_LE(bucket_desc.length(), num_buckets);
 
   hashes.Reset();
   ARROW_RETURN_NOT_OK(hashes.Append(table->num_rows(), 0));
@@ -165,9 +160,8 @@ arrow::Status PtHashWorker::Do(int64_t table_size, uint16_t num_partitions) {
     for (int64_t i = 0; i < chunk->length(); ++i, ++table_index) {
       uint64_t pn = pn_bits[i] >> LRN_BITS_PN_SHIFT;
       auto h = murmur3_128(pn, hash_seed);
-      int32_t b = bucketer(h.first);
-      int32_t lb = local_bucketer(b);
-      int32_t pos = --offset_data[lb];
+      uint32_t b = bucketer(h.first);
+      int32_t pos = --offset_data[b];
       hash_data[pos] = h.second;
       origin_data[pos] = table_index;
     }
@@ -272,21 +266,21 @@ arrow::Status PtHashWorker::Do(int64_t table_size, uint16_t num_partitions) {
     auto pn_bits = chunk->data()->GetValues<uint8_t>(0, 0);
     auto pn_data = chunk->data()->GetValues<uint64_t>(1, 0);
     for (int64_t i = 0; i < chunk->length(); ++i, ++table_index) {
-      if (/*unlikely*/!bit_util::GetBit(pn_bits, i))
+      if (UNLIKELY(!bit_util::GetBit(pn_bits, i)))
         continue;
       uint64_t pn = pn_data[i] >> LRN_BITS_PN_SHIFT;
       auto h = murmur3_128(pn, hash_seed);
-      int32_t lb = local_bucketer(bucketer(h.first));
-      uint64_t th = h.second ^ hashed_pilot[pilot_data[lb]];
+      uint32_t b = bucketer(h.first);
+      uint64_t th = h.second ^ hashed_pilot[pilot_data[b]];
       uint32_t p = fastmod_u64(th, M, table_size);
       LOG_IF(ERROR, p != table_index) << table_index << ": pn=" << pn << " " << p;
     }
   }
 
   ARROW_ASSIGN_OR_RAISE(auto pthash_buf, pilot.Finish());
-  auto pthash = std::make_shared<arrow::UInt16Array>(local_buckets, pthash_buf);
+  auto pthash = std::make_shared<arrow::UInt16Array>(num_buckets, pthash_buf);
   LOG(INFO) << "pilot bytes: " << pthash_buf->size() << " ("
-    << local_buckets << " buckets)";
+    << num_buckets << " buckets)";
   LOG(INFO) << pthash->ToString();
 
   pthash::compact encoder1;
@@ -294,24 +288,26 @@ arrow::Status PtHashWorker::Do(int64_t table_size, uint16_t num_partitions) {
   pthash::elias_fano encoder3;
   pthash::sdc encoder4;
 
-  encoder1.encode(pilot_data, local_buckets);
+  encoder1.encode(pilot_data, num_buckets);
   LOG(INFO) << "encoder1 size: " << encoder1.num_bits() / 8 << ' '
             << (encoder1.num_bits() / 8.0) / pthash_buf->size() * 100 << '%';
-  encoder2.encode(pilot_data, local_buckets);
+  encoder2.encode(pilot_data, num_buckets);
   LOG(INFO) << "encoder2 size: " << encoder2.num_bits() / 8 << ' '
             << (encoder2.num_bits() / 8.0) / pthash_buf->size() * 100 << '%';
-  encoder3.encode(pilot_data, local_buckets);
+  encoder3.encode(pilot_data, num_buckets);
   LOG(INFO) << "encoder3 size: " << encoder3.num_bits() / 8 << ' '
             << (encoder3.num_bits() / 8.0) / pthash_buf->size() * 100 << '%';
-  encoder4.encode(pilot_data, local_buckets);
+  encoder4.encode(pilot_data, num_buckets);
   LOG(INFO) << "encoder4 size: " << encoder4.num_bits() / 8 << ' '
             << (encoder4.num_bits() / 8.0) / pthash_buf->size() * 100 << '%';
 
   auto pthash_table = arrow::Table::Make(
     arrow::schema({arrow::field("pilot", arrow::uint16())}), {pthash});
 
+  uint32_t partition = 666;
+  std::string out_path = std::string("final/pn-")+std::to_string(partition)+".arrow";
   ARROW_ASSIGN_OR_RAISE(auto ostream, arrow::io::FileOutputStream
-                        ::Open(std::string("final/pn-")+std::to_string(partition)+".arrow"));
+                        ::Open(out_path));
   ARROW_ASSIGN_OR_RAISE(auto writer, arrow::ipc::MakeFileWriter(
                           ostream.get(), res->schema(),
                           arrow::ipc::IpcWriteOptions{},
@@ -319,8 +315,9 @@ arrow::Status PtHashWorker::Do(int64_t table_size, uint16_t num_partitions) {
   ARROW_RETURN_NOT_OK(writer->WriteTable(*res));
   ARROW_RETURN_NOT_OK(writer->Close());
 
+  std::string pthash_path = std::string("final/pn-")+std::to_string(partition)+".pthash.arrow";
   ARROW_ASSIGN_OR_RAISE(auto ostream_index, arrow::io::FileOutputStream
-                        ::Open(std::string("final/pn-")+std::to_string(partition)+".pthash.arrow"));
+                        ::Open(pthash_path));
   ARROW_ASSIGN_OR_RAISE(auto writer_index, arrow::ipc::MakeFileWriter(
                           ostream_index.get(), pthash_table->schema(),
                           arrow::ipc::IpcWriteOptions{}));
@@ -368,27 +365,25 @@ arrow::Status BuildPTHash(const po::variables_map& options,
 
   executor->WaitForIdle();
 
-  int64_t table_size = 0, total_rows = 0;
+  int64_t max_rows = 0, total_rows = 0;
   for (size_t i = 0; i < fragments.size(); ++i) {
     int64_t nrows = workers[i].table->num_rows();
     total_rows += nrows;
-    table_size = std::max(nrows, table_size);
+    max_rows = std::max(nrows, max_rows);
     LOG(INFO) << "Found fragment: "
               << fragments[i]->ToString()
               << " rows: " << nrows;
   }
 
   float config_alpha = 0.98;
-  LOG(INFO) << "max fragment:\t" << table_size;
+  LOG(INFO) << "max fragment:\t" << max_rows;
   LOG(INFO) << "total_rows:\t\t" << total_rows;
-  LOG(INFO) << "adjusted:\t\t" << table_size * fragments.size();
-  LOG(INFO) << "optimal T:\t\t" << (uint64_t)(total_rows / config_alpha);
-  LOG(INFO) << "partitioned T:\t" << (uint64_t)(table_size * fragments.size() / config_alpha);
 
-  int64_t extended_table_size = table_size / config_alpha;
+  int64_t table_size = total_rows / config_alpha / nr_parts;
+  CHECK_GT(table_size, int64_t(max_rows / 0.99));
   for (auto& worker : workers) {
     ARROW_CHECK_OK(executor->Spawn([&]() {
-      ARROW_CHECK_OK(worker.Do(extended_table_size, nr_parts));
+      ARROW_CHECK_OK(worker.Do(table_size, nr_parts));
       worker = PtHashWorker();
     }));
   }
