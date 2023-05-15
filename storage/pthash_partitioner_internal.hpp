@@ -1,68 +1,54 @@
-#ifndef CALLFWD_PTHASH_PARTITIONER_INTERNAL_H_
-#define CALLFWD_PTHASH_PARTITIONER_INTERNAL_H_
+#ifndef CALLFWD_CMD_PARTITION_INTERNAL_H_
+#define CALLFWD_CMD_PARTITION_INTERNAL_H_
 
-#include "compute_kernels.hpp"
 #include <arrow/api.h>
 #include <arrow/io/api.h>
 #include <arrow/ipc/api.h>
-#include <arrow/dataset/api.h>
-#include <arrow/util/unreachable.h>
+#include <arrow/compute/api.h>
 
+#include <condition_variable>
 #include <memory>
 
-namespace acero = arrow::acero;
-
-/** Counts total number of written rows in metadata. */
-struct CountingFileWriter final : arrow::dataset::FileWriter {
-  explicit CountingFileWriter(std::shared_ptr<arrow::dataset::FileWriter> writer,
-                              std::shared_ptr<arrow::KeyValueMetadata> metadata)
-      : FileWriter(writer->schema(), writer->options(), NULLPTR, writer->destination())
-      , writer(std::move(writer))
-      , metadata(std::move(metadata))
-  {}
-
-  arrow::Status Write(const std::shared_ptr<arrow::RecordBatch>& batch) override {
-    rows_written += batch->num_rows();
-    return writer->Write(batch);
-  }
-
-  arrow::Future<> FinishInternal() override {
-    arrow::Unreachable();
-  }
-
-  arrow::Future<> Finish() override {
-    ARROW_RETURN_NOT_OK(
-      metadata->Set("num_rows", std::to_string(rows_written)));
-    return writer->Finish();
-  }
-
-  int64_t rows_written = 0;
-  std::shared_ptr<arrow::dataset::FileWriter> writer;
+struct DataPartition {
+  std::mutex mutex;
+  int64_t num_rows = 0;
+  std::string file_path;
   std::shared_ptr<arrow::KeyValueMetadata> metadata;
+  std::shared_ptr<arrow::io::FileOutputStream> ostream;
+  std::shared_ptr<arrow::ipc::RecordBatchWriter> writer;
 };
 
-/** Arrow dataset format for CountingFileWriter. */
-struct CountingIpcFileFormat : arrow::dataset::IpcFileFormat {
-  arrow::Result<std::shared_ptr<arrow::dataset::FileWriter>> MakeWriter(
-      std::shared_ptr<arrow::io::OutputStream> output,
-      std::shared_ptr<arrow::Schema> schema,
-      std::shared_ptr<arrow::dataset::FileWriteOptions> options,
-      arrow::fs::FileLocator file_locator) const override;
+struct PartitionTask {
+  arrow::Status Init(arrow::MemoryPool* memory_pool);
+  arrow::Status RunColumn(int c);
+  arrow::Result<arrow::RecordBatchVector> Run();
+  arrow::Result<arrow::RecordBatchVector> operator()() { return Run(); }
+
+  const struct CmdPartitionOptions* options;
+  arrow::RecordBatchVector slice; // a slice of P batches
+  std::vector<std::shared_ptr<arrow::Array>> key_column;
+  std::vector<std::unique_ptr<arrow::RecordBatchBuilder>> partition;
 };
 
-using AsyncExecBatch = arrow::Future<std::optional<arrow::compute::ExecBatch>>;
+struct CmdPartitionPriv {
+  arrow::Result<arrow::RecordBatchVector> ReadSlice(int64_t batch_index);
+  arrow::Status Throttle();
+  void ExecTask(PartitionTask task);
+  void IoTask(arrow::RecordBatchVector records);
 
-struct PtHashPartitionerPriv {
-  AsyncExecBatch GenExecBatch() const;
-  arrow::MemoryPool* memory_pool;
+  const struct CmdPartitionOptions* options;
   arrow::compute::ExecContext* exec_context;
-  arrow::io::IOContext* io_context;
-  std::shared_ptr<acero::ExecPlan> exec_plan;
+  const arrow::io::IOContext* io_context;
+
   std::shared_ptr<arrow::io::MemoryMappedFile> source_file;
-  std::shared_ptr<arrow::ipc::RecordBatchFileReader> file_reader;
-  arrow::AsyncGenerator<std::shared_ptr<arrow::RecordBatch>> batch_generator;
-  arrow::dataset::FileSystemDatasetWriteOptions write_options;
-  std::shared_ptr<BucketerOptions> bucketer_options;
+  std::shared_ptr<arrow::ipc::RecordBatchFileReader> batch_reader;
+  std::vector<DataPartition> output;
+
+  mutable std::mutex scheduler_mutex;
+  mutable std::condition_variable producer_cv;
+  arrow::Status last_status;
+  int compute_semaphore = 0;
+  int write_semaphore = 0;
 };
 
-#endif // CALLFWD_PTHASH_PARTITIONER_INTERNAL_H_
+#endif // CALLFWD_CMD_PARTITION_INTERNAL_H_

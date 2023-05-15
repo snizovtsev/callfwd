@@ -1,5 +1,5 @@
-#ifndef CALLFWD_PTHASH_PARTITIONER_H
-#define CALLFWD_PTHASH_PARTITIONER_H
+#ifndef CALLFWD_CMD_PARTITION_H
+#define CALLFWD_CMD_PARTITION_H
 
 #include <arrow/type_fwd.h>
 #include <arrow/compute/type_fwd.h>
@@ -8,43 +8,48 @@
 #include <string>
 #include <memory>
 
-namespace folly {
-  class NestedCommandLineApp;
-}
-
 namespace boost::program_options {
   class options_description;
   class variables_map;
 }
 
-struct PtHashPartitioner;
+struct CommandDescription {
+  const char *name;
+  const char *args;
+  const char *abstract;
+  const char *help;
+};
 
-struct PtHashPartitionerOptions {
-  void AddCommand(folly::NestedCommandLineApp &app,
-                  PtHashPartitioner *command = nullptr);
-  void BindToOptions(boost::program_options::options_description& description);
-  void Store(const boost::program_options::variables_map& options,
-             const std::vector<std::string>& args);
+struct CmdPartitionOptions {
+  void Bind(
+    boost::program_options::options_description& description);
+
+  arrow::Status Store(
+    const boost::program_options::variables_map& options,
+    const std::vector<std::string>& args);
 
   uint64_t hash_seed;
   uint32_t num_partitions;
-  uint32_t num_buckets;
   std::string source_path;
-  std::string output_dir;
-  std::string name_template;
+  std::string output_template;
 };
 
-struct PtHashPartitioner
-#ifdef CALLFWD_PTHASH_PARTITIONER_INTERNAL_H_
-    : private PtHashPartitionerPriv
+struct CmdPartition
+#ifdef CALLFWD_CMD_PARTITION_INTERNAL_H_
+    : private CmdPartitionPriv
 #endif
 {
-  static std::unique_ptr<PtHashPartitioner> Make(
-    arrow::compute::ExecContext* exec_context = nullptr,
-    arrow::MemoryPool* memory_pool = nullptr);
+  using Options = CmdPartitionOptions;
+  static const CommandDescription description;
 
-  arrow::Status Reset(const PtHashPartitionerOptions &options);
-  arrow::Status Drain();
+  static std::unique_ptr<CmdPartition> Make(
+    const Options *options,
+    arrow::compute::ExecContext* exec_context = nullptr,
+    const arrow::io::IOContext* io_context = nullptr);
+
+  arrow::Status Init();
+  arrow::Status Run(int64_t limit = INT64_MAX);
+  arrow::Status Finish(bool incomplete = false);
 };
 
-#endif // CALLFWD_PTHASH_PARTITIONER_H
+#endif // CALLFWD_CMD_PARTITION_H

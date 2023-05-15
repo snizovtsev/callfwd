@@ -88,7 +88,7 @@ arrow::Status PtHashWorker::ReadTable(std::shared_ptr<arrow::ipc::RecordBatchFil
   ARROW_ASSIGN_OR_RAISE(table, arrow::Table::FromRecordBatches(reader->schema(), batches));
 
   metadata = reader->metadata()->Copy();
-  ARROW_ASSIGN_OR_RAISE(auto seed_str, metadata->Get("x_pthash_seed"));
+  ARROW_ASSIGN_OR_RAISE(auto seed_str, metadata->Get("hash_seed"));
   hash_seed = folly::to<uint64_t>(seed_str);
   //num_buckets = folly::to<uint32_t>(metadata->Get("x_pthash_buckets").ValueOrDie());
 
@@ -528,19 +528,53 @@ int main(int argc, const char* argv[]) {
   setlocale(LC_ALL, "C");
   google::InitGoogleLogging(argv[0]);
   google::InstallFailureSignalHandler();
+  FLAGS_logtostderr = 1;
 
   RegisterCustomFunctions(arrow::compute::GetFunctionRegistry());
   arrow::dataset::internal::Initialize();
 
+  int64_t run_limit = INT64_MAX;
+
   folly::NestedCommandLineApp app{argv[0], "0.9", "", "", nullptr};
   app.addGFlags(folly::ProgramOptionsStyle::GNU);
-  FLAGS_logtostderr = 1;
+  app.globalOptions().add_options()
+      ("limit,l", po::value(&run_limit)->default_value(INT64_MAX));
 
   PnOrderedJoinOptions pn_ordered_join;
   pn_ordered_join.AddCommand(app);
 
-  PtHashPartitionerOptions pthash_partitioner;
-  pthash_partitioner.AddCommand(app);
+  CmdPartition::Options partition_opts;
+  std::unique_ptr<CmdPartition> partition_cmd;
+
+  auto &opt_desc = app.addCommand(
+      CmdPartition::description.name,
+      CmdPartition::description.args,
+      CmdPartition::description.abstract,
+      CmdPartition::description.help,
+      [&](const po::variables_map& options,
+          const std::vector<std::string>& args)
+      {
+        arrow::Status st = partition_opts.Store(options, args);
+        if (!st.ok())
+          throw folly::ProgramExit(1, st.message());
+
+        partition_cmd = CmdPartition::Make(&partition_opts);
+
+        st = partition_cmd->Init();
+        if (!st.ok())
+          throw folly::ProgramExit(1, std::string("Init: ") + st.message());
+
+        st = partition_cmd->Run(run_limit);
+        if (!st.ok()) {
+          ARROW_WARN_NOT_OK(partition_cmd->Finish(true), "Finish");
+          throw folly::ProgramExit(2, std::string("Run: ") + st.message());
+        }
+
+        st = partition_cmd->Finish(false);
+        if (!st.ok())
+          throw folly::ProgramExit(2, std::string("Finish: ") + st.message());
+      });
+  partition_opts.Bind(opt_desc);
 
   auto& pthash_pn_cmd = app.addCommand(
       "pthash-build", "arrow_table_path",
