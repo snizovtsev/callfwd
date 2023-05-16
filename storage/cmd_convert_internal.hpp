@@ -1,5 +1,5 @@
-#ifndef CALLFWD_PN_ORDERED_JOIN_INTERNAL_H_
-#define CALLFWD_PN_ORDERED_JOIN_INTERNAL_H_
+#ifndef CALLFWD_CMD_CONVERT_INTERNAL_H_
+#define CALLFWD_CMD_CONVERT_INTERNAL_H_
 
 #include "csv_reader.hpp"
 
@@ -80,7 +80,7 @@ class MonotonicVarintSequenceEncoder {
   uint64_t prev_ = 0;
 };
 
-struct PnOrderedJoinPriv {
+struct CmdConvertPriv {
   arrow::MemoryPool *memory_pool;
   PnRecord row;
   PnMultiReader reader;
@@ -92,4 +92,4 @@ struct PnOrderedJoinPriv {
   std::map<uint64_t, MonotonicVarintSequenceEncoder> rn_data;
 };
 
-#endif // CALLFWD_PN_ORDERED_JOIN_INTERNAL_H_
+#endif // CALLFWD_CMD_CONVERT_INTERNAL_H_

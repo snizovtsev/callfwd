@@ -1,8 +1,8 @@
 #include "bit_magic.hpp"
-#include "pn_ordered_join.hpp"
 #include "lrn_schema.hpp"
 #include "pthash/pthash.hpp"
-#include "pthash_partitioner.hpp"
+#include "cmd_convert.hpp"
+#include "cmd_partition.hpp"
 #include "compute_kernels.hpp"
 #include "pthash_bucketer.hpp"
 
@@ -511,7 +511,7 @@ arrow::Status Metadata(const po::variables_map& options,
   return arrow::Status::OK();
 }
 
-template<class Entrypoint>
+template <class Entrypoint>
 folly::NestedCommandLineApp::Command ArrowCommand(const Entrypoint &entrypoint)
 {
   return [&](const po::variables_map& options, const std::vector<std::string> &args)
@@ -521,6 +521,53 @@ folly::NestedCommandLineApp::Command ArrowCommand(const Entrypoint &entrypoint)
       throw folly::ProgramExit(1, st.message());
   };
 }
+
+static int64_t RUN_LIMIT = INT64_MAX;
+
+template <class CommandType>
+struct CommandRegistar {
+  void operator()(const po::variables_map& kwargs,
+                  const std::vector<std::string>& args)
+  {
+    status = CmdOps<CommandType>::StoreArgs(kwargs, args, options);
+    if (!status.ok())
+      throw folly::ProgramExit(1, status.message());
+
+    auto command = CommandType::Make();
+
+    status = command->Init(options);
+    if (!status.ok())
+      throw folly::ProgramExit(1, std::string("Init: ") + status.message());
+
+    status = command->Run(RUN_LIMIT);
+    if (!status.ok()) {
+      ARROW_WARN_NOT_OK(command->Finish(true), "Finish");
+      throw folly::ProgramExit(2, std::string("Run: ") + status.message());
+    }
+
+    status = command->Finish(false);
+    if (!status.ok())
+      throw folly::ProgramExit(2, std::string("Finish: ") + status.message());
+  }
+
+  void Register(folly::NestedCommandLineApp& app) {
+    CmdOps<CommandType>::BindOptions(
+        app.addCommand(
+            CommandType::description.name,
+            CommandType::description.args,
+            CommandType::description.abstract,
+            CommandType::description.help,
+            std::ref(*this)),
+        options);
+  }
+
+  static CommandRegistar<CommandType> instance;
+  typename CommandType::Options options;
+  arrow::Status status;
+};
+
+template<> CommandRegistar<CmdConvert>   CommandRegistar<CmdConvert>::instance{};
+template<> CommandRegistar<CmdPartition> CommandRegistar<CmdPartition>::instance{};
 
 int main(int argc, const char* argv[]) {
   using namespace std::placeholders;
@@ -533,48 +580,13 @@ int main(int argc, const char* argv[]) {
   RegisterCustomFunctions(arrow::compute::GetFunctionRegistry());
   arrow::dataset::internal::Initialize();
 
-  int64_t run_limit = INT64_MAX;
-
   folly::NestedCommandLineApp app{argv[0], "0.9", "", "", nullptr};
   app.addGFlags(folly::ProgramOptionsStyle::GNU);
   app.globalOptions().add_options()
-      ("limit,l", po::value(&run_limit)->default_value(INT64_MAX));
+      ("limit,l", po::value(&RUN_LIMIT)->default_value(INT64_MAX));
 
-  PnOrderedJoinOptions pn_ordered_join;
-  pn_ordered_join.AddCommand(app);
-
-  CmdPartition::Options partition_opts;
-  std::unique_ptr<CmdPartition> partition_cmd;
-
-  auto &opt_desc = app.addCommand(
-      CmdPartition::description.name,
-      CmdPartition::description.args,
-      CmdPartition::description.abstract,
-      CmdPartition::description.help,
-      [&](const po::variables_map& options,
-          const std::vector<std::string>& args)
-      {
-        arrow::Status st = partition_opts.Store(options, args);
-        if (!st.ok())
-          throw folly::ProgramExit(1, st.message());
-
-        partition_cmd = CmdPartition::Make(&partition_opts);
-
-        st = partition_cmd->Init();
-        if (!st.ok())
-          throw folly::ProgramExit(1, std::string("Init: ") + st.message());
-
-        st = partition_cmd->Run(run_limit);
-        if (!st.ok()) {
-          ARROW_WARN_NOT_OK(partition_cmd->Finish(true), "Finish");
-          throw folly::ProgramExit(2, std::string("Run: ") + st.message());
-        }
-
-        st = partition_cmd->Finish(false);
-        if (!st.ok())
-          throw folly::ProgramExit(2, std::string("Finish: ") + st.message());
-      });
-  partition_opts.Bind(opt_desc);
+  CommandRegistar<CmdConvert>::instance.Register(app);
+  CommandRegistar<CmdPartition>::instance.Register(app);
 
   auto& pthash_pn_cmd = app.addCommand(
       "pthash-build", "arrow_table_path",

@@ -1,15 +1,15 @@
+#include "cmd_convert_internal.hpp"
+#include "cmd_convert.hpp"
 #include "lrn_schema.hpp"
-#include "pn_ordered_join_internal.hpp"
-#include "pn_ordered_join.hpp"
 
-#include <folly/experimental/NestedCommandLineApp.h>
+#include <boost/program_options/options_description.hpp>
 
 #include <memory>
 
 namespace po = boost::program_options;
 using Status = arrow::Status;
 
-std::shared_ptr<arrow::Schema> PnOrderedJoin::pn_schema() {
+std::shared_ptr<arrow::Schema> CmdConvert::pn_schema() {
   static std::shared_ptr<arrow::Schema> schema = arrow::schema({
       arrow::field("pn_bits", arrow::uint64()),
       arrow::field("rn_bits", arrow::uint64()),
@@ -17,7 +17,7 @@ std::shared_ptr<arrow::Schema> PnOrderedJoin::pn_schema() {
   return schema;
 }
 
-std::shared_ptr<arrow::Schema> PnOrderedJoin::ym_schema() {
+std::shared_ptr<arrow::Schema> CmdConvert::ym_schema() {
   static std::shared_ptr<arrow::Schema> schema = arrow::schema({
       arrow::field("spam_score", arrow::float32()),
       arrow::field("fraud_prob", arrow::float32()),
@@ -27,7 +27,7 @@ std::shared_ptr<arrow::Schema> PnOrderedJoin::ym_schema() {
   return schema;
 }
 
-std::shared_ptr<arrow::Schema> PnOrderedJoin::rn_schema() {
+std::shared_ptr<arrow::Schema> CmdConvert::rn_schema() {
   static std::shared_ptr<arrow::Schema> schema = arrow::schema({
       arrow::field("rn", arrow::uint64()),
       arrow::field("pn_set", arrow::binary()),
@@ -35,14 +35,14 @@ std::shared_ptr<arrow::Schema> PnOrderedJoin::rn_schema() {
   return schema;
 }
 
-std::unique_ptr<PnOrderedJoin> PnOrderedJoin::Make(arrow::MemoryPool* memory_pool)
+std::unique_ptr<CmdConvert> CmdConvert::Make(arrow::MemoryPool* memory_pool)
 {
-  auto cmd = std::make_unique<PnOrderedJoin>();
+  auto cmd = std::make_unique<CmdConvert>();
   cmd->memory_pool = memory_pool ?: arrow::default_memory_pool();
   return cmd;
 }
 
-Status PnOrderedJoin::Reset(const PnOrderedJoinOptions &options)
+Status CmdConvert::Init(const Options& options)
 {
   reader.lrn.clear();
   reader.lrn.reserve(options.lrn_data_paths.size());
@@ -98,7 +98,7 @@ Status RegularTableWriter::Reset(const std::shared_ptr<arrow::Schema>& schema,
   return Status::OK();
 }
 
-Status PnOrderedJoin::Drain(uint32_t limit) {
+Status CmdConvert::Run(int64_t limit) {
   auto& pn_bits_builder = *pn_writer.GetFieldAs<arrow::UInt64Builder>(0);
   auto& rn_bits_builder = *pn_writer.GetFieldAs<arrow::UInt64Builder>(1);
   auto& spam_score = *ym_writer.GetFieldAs<arrow::FloatBuilder>(0);
@@ -106,7 +106,7 @@ Status PnOrderedJoin::Drain(uint32_t limit) {
   auto& unlawful_prob = *ym_writer.GetFieldAs<arrow::FloatBuilder>(2);
   auto& tcpa_fraud_prob = *ym_writer.GetFieldAs<arrow::FloatBuilder>(3);
 
-  for (; joiner.NextRow(reader, row) && limit; --limit) {
+  for (; joiner.NextRow(reader, row) && limit > 0; --limit) {
     uint64_t pn = row.lrn.pn | row.dnc.pn | row.dno.pn | row.youmail.pn;
     uint64_t pn_bits = pn << LRN_BITS_PN_SHIFT;
     uint64_t rn_bits = 0;
@@ -222,7 +222,7 @@ Status RegularTableWriter::Finish() {
   return arrow::Status::OK();
 }
 
-Status PnOrderedJoin::FlushRnData() {
+Status CmdConvert::Finish(bool incomplete) {
   auto& rn_builder = *rn_writer.GetFieldAs<arrow::UInt64Builder>(0);
   auto& pn_set_builder = *rn_writer.GetFieldAs<arrow::BinaryBuilder>(1);
 
@@ -245,86 +245,60 @@ Status PnOrderedJoin::FlushRnData() {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-static void Main(PnOrderedJoinOptions& options,
-                 const po::variables_map& vm,
-                 const std::vector<std::string> &args,
-                 PnOrderedJoin& command)
+const CmdDescription CmdConvert::description = {
+  .name = "convert",
+  .args = "lrn_csv_path [additional_lrn_path...]",
+  .abstract = "Convert PN data from multiple sources into arrow format",
+  .help = "Read multiple CSV data sources and convert them\n"
+          " to a single arrow table.\n\n"
+          "Glossary:\nPN, RN - 10-digit numbers (34 bits)\n"
+          "LRN: an ordered adjective mapping from PN to RN\n"
+          "DNC: an ordered set of PN numbers (PN concatenated from 2 rows)\n"
+          "DNO: an ordered mapping from PN to 1..8\n",
+};
+
+template <>
+void CmdOps<CmdConvert>::BindOptions(po::options_description& description,
+                                     CmdConvertOptions& options)
 {
-  arrow::Status st;
-
-  options.Store(vm, args);
-  st = command.Reset(options);
-
-  if (!st.ok())
-    throw folly::ProgramExit(1, "error: " + st.message());
-
-  st = command.Drain();
-  if (!st.ok())
-    throw folly::ProgramExit(2, "error: " + st.message());
-
-  st = command.FlushRnData();
-  if (!st.ok())
-    throw folly::ProgramExit(2, "error: " + st.message());
-}
-
-void PnOrderedJoinOptions::AddCommand(folly::NestedCommandLineApp &app,
-                                      PnOrderedJoin *command)
-{
-  using namespace std::placeholders;
-  static auto default_command = PnOrderedJoin::Make();
-
-  if (!command)
-    command = default_command.get();
-
-  po::options_description& options = app.addCommand(
-      "pn-ordered-join", "lrn_csv_path [additional_lrn_path...]",
-      "Convert PN data from multiple sources into arrow format",
-      "Read multiple CSV data sources and convert them\n"
-      " to a single arrow table.\n\n"
-      "Glossary:\nPN, RN - 10-digit numbers (34 bits)\n"
-      "LRN: an ordered adjective mapping from PN to RN\n"
-      "DNC: an ordered set of PN numbers (PN concatenated from 2 rows)\n"
-      "DNO: an ordered mapping from PN to 1..8\n",
-      std::bind(&Main, std::ref(*this), _1, _2, std::ref(*command)));
-  BindToOptions(options);
-}
-
-void PnOrderedJoinOptions::BindToOptions(po::options_description& description) {
   static const std::string devnull = "/dev/null";
   description.add_options()
       ("dnc",
-       po::value(&dnc_data_path)->default_value(devnull),
+       po::value(&options.dnc_data_path)->default_value(devnull),
        "DNC database path (CSV). Optional.\n"
        "Example row:\n  201,0000000")
       ("dno",
-       po::value(&dno_data_path)->default_value(devnull),
+       po::value(&options.dno_data_path)->default_value(devnull),
        "DNO database path (CSV). Optional.\n"
        "Example row:\n  2012000000,4")
       ("youmail",
-       po::value(&ym_data_path)->default_value(devnull),
+       po::value(&options.ym_data_path)->default_value(devnull),
        "YouMail database path (CSV). Optional.\n"
        "Example row:\n  +12032614649,ALMOST_CERTAINLY,0.95,0.95,0.95")
       ("output,O",
-       po::value(&pn_output_path)->required(),
+       po::value(&options.pn_output_path)->required(),
        "Arrow PN table output path. Required.")
       ("output-batch",
-       po::value(&pn_rows_per_batch)->default_value(LRN_ROWS_PER_CHUNK))
+       po::value(&options.pn_rows_per_batch)->default_value(LRN_ROWS_PER_CHUNK))
       ("ym-output,Y",
-       po::value(&ym_output_path)->default_value(devnull),
+       po::value(&options.ym_output_path)->default_value(devnull),
        "Arrow table output path. Required if YouMail present.")
       ("ym-batch",
-       po::value(&ym_rows_per_batch)->default_value(YM_ROWS_PER_CHUNK))
+       po::value(&options.ym_rows_per_batch)->default_value(YM_ROWS_PER_CHUNK))
       ("rn-output,R",
-       po::value(&rn_output_path)->required(),
+       po::value(&options.rn_output_path)->required(),
        "Arrow RN table output path. Required.")
       ("rn-batch",
-       po::value(&rn_rows_per_batch)->default_value(RN_ROWS_PER_CHUNK));
+       po::value(&options.rn_rows_per_batch)->default_value(RN_ROWS_PER_CHUNK));
 }
 
-void PnOrderedJoinOptions::Store(const po::variables_map& vm,
-                                 const std::vector<std::string> &args)
+template <>
+Status CmdOps<CmdConvert>::StoreArgs(const po::variables_map& vm,
+                                     const std::vector<std::string>& args,
+                                     CmdConvertOptions& options)
 {
-  lrn_data_paths = args;
-  if (lrn_data_paths.empty())
-    throw folly::ProgramExit(1, "At least 1 positional argument required.");
+  if (args.empty())
+    return Status::Invalid("At least 1 positional argument required.");
+  options.lrn_data_paths = args;
+  return Status::OK();
 }

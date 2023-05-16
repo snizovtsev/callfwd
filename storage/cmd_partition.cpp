@@ -1,5 +1,5 @@
-#include "pthash_partitioner_internal.hpp"
-#include "pthash_partitioner.hpp"
+#include "cmd_partition_internal.hpp"
+#include "cmd_partition.hpp"
 #include "bit_magic.hpp"
 #include "lrn_schema.hpp"
 
@@ -10,7 +10,6 @@
 #include <arrow/util/counting_semaphore.h>
 #include <fmt/format.h>
 #include <glog/logging.h>
-#include <folly/experimental/NestedCommandLineApp.h>
 #include <folly/Conv.h>
 #include <boost/program_options/options_description.hpp>
 #include <memory>
@@ -120,18 +119,21 @@ Result<arrow::RecordBatchVector> PartitionTask::Run() {
 }
 
 std::unique_ptr<CmdPartition>
-CmdPartition::Make(const Options *options,
-                   arrow::compute::ExecContext* exec_context,
+CmdPartition::Make(arrow::compute::ExecContext* exec_context,
                    const arrow::io::IOContext* io_context)
 {
   auto cmd = std::make_unique<CmdPartition>();
   cmd->exec_context = exec_context ?: arrow::compute::threaded_exec_context();
   cmd->io_context = io_context ?: &arrow::io::default_io_context();
-  cmd->options = options;
   return cmd;
 }
 
-Status CmdPartition::Init() {
+Status CmdPartition::Init(const Options& options_) {
+  /* Maximum number of tasks queued */
+  compute_semaphore = exec_context->executor()->GetCapacity() * 2;
+  write_semaphore = io_context->executor()->GetCapacity() * 2;
+  options = &options_;
+
   ARROW_ASSIGN_OR_RAISE(source_file, arrow::io::MemoryMappedFile
                         ::Open(options->source_path, arrow::io::FileMode::READ));
   ARROW_ASSIGN_OR_RAISE(batch_reader, arrow::ipc::RecordBatchFileReader
@@ -144,15 +146,12 @@ Status CmdPartition::Init() {
   for (uint32_t p = 0; p < options->num_partitions; ++p) {
     DataPartition &part = output[p];
     part.metadata = std::make_shared<arrow::KeyValueMetadata>();
+    part.file_path = fmt::format(options->output_template, p);
     ARROW_ASSIGN_OR_RAISE(part.ostream, arrow::io::FileOutputStream::Open(
-        fmt::format(options->output_template, p)));
+        part.file_path));
     ARROW_ASSIGN_OR_RAISE(part.writer, arrow::ipc::MakeFileWriter(
         part.ostream, batch_reader->schema(), write_opts, part.metadata));
   }
-
-  /* Maximum number of tasks queued */
-  compute_semaphore = exec_context->executor()->GetCapacity() * 2;
-  write_semaphore = io_context->executor()->GetCapacity() * 2;
 
   return Status::OK();
 }
@@ -276,28 +275,35 @@ Status CmdPartition::Finish(bool incomplete) {
   return last_status;
 }
 
-const CommandDescription CmdPartition::description = {
+////////////////////////////////////////////////////////////////////////////////
+
+const CmdDescription CmdPartition::description = {
   .name = "partition",
   .args = "arrow_file",
   .abstract = "Split the data into partitions grouped by a hash of key",
   .help = "",
 };
 
-void CmdPartitionOptions::Bind(po::options_description& description) {
+template <>
+void CmdOps<CmdPartition>::BindOptions(po::options_description& description,
+                                       CmdPartitionOptions& options)
+{
   description.add_options()
       ("seed,s",
-       po::value(&hash_seed)->default_value(424242))
+       po::value(&options.hash_seed)->default_value(424242))
       ("partitions,n",
-       po::value(&num_partitions)->default_value(64))
+       po::value(&options.num_partitions)->default_value(64))
       ("output-template,o",
-       po::value(&output_template)->default_value("parts/pn-{}.arrow"));
+       po::value(&options.output_template)->default_value("parts/pn-{}.arrow"));
 }
 
-Status CmdPartitionOptions::Store(const po::variables_map& options,
-                                    const std::vector<std::string>& args) {
+template <>
+Status CmdOps<CmdPartition>::StoreArgs(const po::variables_map& vm,
+                                       const std::vector<std::string>& args,
+                                       CmdPartitionOptions& options)
+{
   if (args.size() != 1u)
     return Status::Invalid("arrow source path expected");
-
-  source_path = args[0];
+  options.source_path = args[0];
   return Status::OK();
 }
