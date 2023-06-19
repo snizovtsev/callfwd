@@ -2,3 +2,5 @@ Index:
   StandardLibrary: No
 CompileFlags:
   CompilationDatabase: bazel-bin/tools
+  Add: [-DGLOG_DEPRECATED=, -DGLOG_EXPORT=]
+  Remove: -fno-canonical-system-headers
