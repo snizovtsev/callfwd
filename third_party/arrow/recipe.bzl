@@ -26,6 +26,7 @@ arrow_defs = [
     "ARROW_FILESYSTEM",
     "ARROW_IPC",
     "ARROW_USE_NATIVE_INT128",
+    "ARROW_WITH_OPENTELEMETRY",
 ]
 
 arrow_undefs = [
@@ -41,7 +42,6 @@ arrow_undefs = [
     "ARROW_GCS",
     "ARROW_S3",
     "ARROW_WITH_MUSL",
-    "ARROW_WITH_OPENTELEMETRY",
     "ARROW_WITH_UCX",
     "GRPCPP_PP_INCLUDE",
 ]
@@ -73,9 +73,13 @@ glob_exclude_files = [
     "cpp/src/arrow/memory_pool_jemalloc.*",
     "cpp/src/arrow/**/test_common.*",
     "cpp/src/arrow/testing/**",
+    "cpp/src/arrow/util/compression_brotli.*",
+    "cpp/src/arrow/util/compression_bz2.*",
     "cpp/src/arrow/util/compression_lz4.*",
     "cpp/src/arrow/util/compression_snappy.*",
-    "cpp/src/arrow/util/tracing_internal.cc",
+    "cpp/src/arrow/util/compression_zlib.*",
+    "cpp/src/arrow/util/compression_zstd.*",
+    #"cpp/src/arrow/util/tracing_internal.cc",
 ]
 
 glob_hdrs = glob([
@@ -134,5 +138,9 @@ cc_library(
     deps = [
         "@com_github_xtensor-stack_xsimd//:xsimd",
         "@com_github_google_glog//:glog",
+        "@io_opentelemetry_cpp//api",
+        "@io_opentelemetry_cpp//exporters/ostream:ostream_span_exporter",
+        "@io_opentelemetry_cpp//exporters/otlp:otlp_http_exporter",
+        "@com_github_opentelemetry_proto//:trace_service_proto_cc",
     ]
 )
