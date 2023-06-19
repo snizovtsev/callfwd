@@ -8,14 +8,16 @@
 
 struct SkewBucketer {
   // TODO: adjust to primes?
-  explicit SkewBucketer(uint32_t dense_buckets, uint32_t sparse_buckets)
+  SkewBucketer() noexcept = default;
+
+  explicit SkewBucketer(uint32_t dense_buckets, uint32_t sparse_buckets) noexcept
     : dense_buckets(dense_buckets)
     , sparse_buckets(sparse_buckets)
     , M_dense_buckets(fastmod_computeM_u64(dense_buckets))
     , M_sparse_buckets(fastmod_computeM_u64(sparse_buckets))
   {}
 
-  explicit SkewBucketer(uint32_t num_buckets)
+  explicit SkewBucketer(uint32_t num_buckets) noexcept
     : dense_buckets(0.3 * num_buckets)
     , sparse_buckets(num_buckets - dense_buckets)
     , M_dense_buckets(fastmod_computeM_u64(dense_buckets))
@@ -38,10 +40,10 @@ struct SkewBucketer {
     return dense_buckets + sparse_buckets;
   }
 
-  uint32_t dense_buckets;
-  uint32_t sparse_buckets;
-  __uint128_t M_dense_buckets;
-  __uint128_t M_sparse_buckets;
+  uint32_t dense_buckets = 0;
+  uint32_t sparse_buckets = 0;
+  __uint128_t M_dense_buckets = 0;
+  __uint128_t M_sparse_buckets = 0;
 };
 
 #endif // CALLFWD_PTHASH_BUCKETER_H_

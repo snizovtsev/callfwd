@@ -7,7 +7,6 @@
 #include <arrow/io/api.h>
 #include <arrow/ipc/api.h>
 #include <arrow/filesystem/api.h>
-#include <arrow/util/counting_semaphore.h>
 #include <fmt/format.h>
 #include <glog/logging.h>
 #include <folly/Conv.h>
@@ -21,20 +20,20 @@ template <class T> using Result = arrow::Result<T>;
 using arrow::internal::checked_cast;
 using arrow::internal::ThreadPool;
 
-Status PartitionTask::Init(arrow::MemoryPool* memory_pool) {
-  CHECK(slice.size());
-  auto& schema = slice[0]->schema();
+Status PartitionTask::Init(const CmdPartitionPriv* cmd) {
+  const auto output_schema = cmd->output[0].schema;
+  const auto memory_pool = cmd->exec_context->memory_pool();
+  const size_t nr_parts = slice.size();
   int64_t capacity = slice[0]->num_rows();
-  size_t nr_parts = slice.size();
 
   capacity += capacity / 10;
-  partition.resize(nr_parts);
-  key_column.resize(nr_parts);
+  options = cmd->options;
+  output.resize(nr_parts);
+  CHECK(nr_parts);
 
-  for (size_t i = 0; i < nr_parts; ++i) {
-    ARROW_ASSIGN_OR_RAISE(partition[i], arrow::RecordBatchBuilder
-                          ::Make(schema, memory_pool, capacity));
-    key_column[i] = slice[i]->GetColumnByName("pn_bits");
+  for (auto& builder_ptr : output) {
+    ARROW_ASSIGN_OR_RAISE(builder_ptr, arrow::RecordBatchBuilder::Make(
+        output_schema, memory_pool, capacity));
   }
 
   return Status::OK();
@@ -54,14 +53,13 @@ struct ArrayPartitioner {
     using BuilderType = typename arrow::TypeTraits<TypeClass>::BuilderType;
 
     const T& source = checked_cast<const T&>(array);
-    auto target = reinterpret_cast<BuilderType**>(partition.data());
-    uint64_t mask = partition.size() - 1;
+    auto target = reinterpret_cast<BuilderType**>(builders.data());
+    const int64_t length = source.length();
 
-    int64_t length = source.length();
     for (int64_t i = 0; i < length; ++i) {
-      auto h = murmur3_128(key_data[i] >> LRN_BITS_PN_SHIFT, hash_seed);
-      uint64_t p = (h.first ^ h.second) & mask;
-      ARROW_RETURN_NOT_OK(target[p]->Append(source.Value(i)));
+      const uint16_t p = partition->GetView(i);
+      DCHECK_LT(p, builders.size());
+      ARROW_RETURN_NOT_OK(target[p]->Append(source.GetView(i)));
     }
 
     return Status::OK();
@@ -73,44 +71,78 @@ struct ArrayPartitioner {
     return Status::NotImplemented("not a simple type");
   }
 
-  Status Run(const uint64_t* key_data_, const arrow::Array& array) {
-    key_data = key_data_;
-    return VisitArrayInline(array, this);
-  }
-
-  std::vector<arrow::ArrayBuilder*> partition;
-  const uint64_t* key_data = nullptr;
-  uint64_t hash_seed;
+  std::vector<arrow::ArrayBuilder*> builders;
+  std::shared_ptr<arrow::UInt16Array> partition;
 };
 
 Status PartitionTask::RunColumn(int c) {
   ArrayPartitioner visitor;
 
-  visitor.hash_seed = options->hash_seed;
-  for (auto& builder : partition) {
-    visitor.partition.push_back(builder->GetField(c));
+  visitor.builders.reserve(output.size());
+  for (auto& builder : output) {
+    visitor.builders.push_back(builder->GetField(c - 1));
   }
 
-  for (size_t batch = 0; batch < slice.size(); ++batch) {
-    const uint64_t *key_data = key_column[batch]->data()->GetValues<uint64_t>(1);
-    std::shared_ptr<arrow::Array> column_chunk = slice[batch]->column(c);
-    if (UNLIKELY(!key_data))
-      return Status::Invalid("Only uint64 keys are supported");
-    ARROW_RETURN_NOT_OK(visitor.Run(key_data, *column_chunk));
+  for (auto& batch : slice) {
+    std::shared_ptr<arrow::Array> chunk = batch->column(c);
+    visitor.partition = std::dynamic_pointer_cast<arrow::UInt16Array>(
+        batch->column(0));
+    ARROW_RETURN_NOT_OK(VisitArrayInline(*chunk, &visitor));
+  }
+
+  return Status::OK();
+}
+
+Status PartitionTask::HashKeys() {
+  const uint64_t hash_seed = options->hash_seed;
+  const uint64_t partition_mask = output.size() - 1;
+  std::vector<arrow::UInt64Builder*> hash1;
+  std::vector<arrow::UInt64Builder*> hash2;
+  arrow::UInt16Builder partition;
+
+  hash1.reserve(output.size());
+  hash2.reserve(output.size());
+  for (auto& builder : output) {
+    hash1.push_back(checked_cast<arrow::UInt64Builder*>(
+        builder->GetField(builder->num_fields() - 2)));
+    hash2.push_back(checked_cast<arrow::UInt64Builder*>(
+        builder->GetField(builder->num_fields() - 1)));
+  }
+
+  for (auto& batch : slice) {
+    const int64_t num_rows = batch->num_rows();
+    auto key_column = std::dynamic_pointer_cast<arrow::UInt64Array>(
+        batch->GetColumnByName(options->key_column));
+    ARROW_RETURN_NOT_OK(partition.Reserve(num_rows));
+
+    for (int64_t index = 0; index < num_rows; ++index) {
+      const auto key_data = key_column->GetView(index);
+      const auto h128 = murmur3_128(key_data >> LRN_BITS_PN_SHIFT, hash_seed);
+      const uint16_t p = (h128.first ^ h128.second) & partition_mask;
+      partition.UnsafeAppend(p);
+      ARROW_RETURN_NOT_OK(hash1[p]->Append(h128.first));
+      ARROW_RETURN_NOT_OK(hash2[p]->Append(h128.second));
+    }
+
+    ARROW_ASSIGN_OR_RAISE(auto new_column, partition.Finish());
+    ARROW_ASSIGN_OR_RAISE(batch, batch->AddColumn(
+        0, arrow::field("partition", new_column->type()), new_column));
   }
 
   return Status::OK();
 }
 
 Result<arrow::RecordBatchVector> PartitionTask::Run() {
-  int num_columns = slice[0]->num_columns();
-  for (int c = 0; c < num_columns; ++c) {
+  const int num_columns = slice[0]->num_columns();
+
+  ARROW_RETURN_NOT_OK(HashKeys()); // inserts 'partition' column
+  for (int c = 1; c <= num_columns; ++c) {
     ARROW_RETURN_NOT_OK(RunColumn(c));
   }
 
   arrow::RecordBatchVector result;
   result.reserve(slice.size());
-  for (auto& builder : partition) {
+  for (auto& builder : output) {
     ARROW_ASSIGN_OR_RAISE(auto partition, builder->Flush(false));
     result.push_back(std::move(partition));
   }
@@ -139,18 +171,25 @@ Status CmdPartition::Init(const Options& options_) {
   ARROW_ASSIGN_OR_RAISE(batch_reader, arrow::ipc::RecordBatchFileReader
                         ::Open(source_file, arrow::ipc::IpcReadOptions{}));
 
+  auto output_fields = batch_reader->schema()->fields();
+  output_fields.push_back(arrow::field("hash1", arrow::uint64()));
+  output_fields.push_back(arrow::field("hash2", arrow::uint64()));
+  auto output_schema = arrow::schema(std::move(output_fields),
+                                     batch_reader->schema()->metadata());
+
   arrow::ipc::IpcWriteOptions write_opts;
   write_opts.memory_pool = exec_context->memory_pool();
   output = std::vector<DataPartition>(options->num_partitions);
 
   for (uint32_t p = 0; p < options->num_partitions; ++p) {
     DataPartition &part = output[p];
+    part.schema = output_schema;
     part.metadata = std::make_shared<arrow::KeyValueMetadata>();
     part.file_path = fmt::format(options->output_template, p);
     ARROW_ASSIGN_OR_RAISE(part.ostream, arrow::io::FileOutputStream::Open(
         part.file_path));
     ARROW_ASSIGN_OR_RAISE(part.writer, arrow::ipc::MakeFileWriter(
-        part.ostream, batch_reader->schema(), write_opts, part.metadata));
+        part.ostream, part.schema, write_opts, part.metadata));
   }
 
   return Status::OK();
@@ -180,9 +219,9 @@ Status CmdPartition::Run(int64_t limit) {
   int64_t batch;
 
   for (batch = 0; batch < run_batches; batch += num_partitions) {
-    PartitionTask task{options};
+    PartitionTask task;
     ARROW_RETURN_NOT_OK(ReadSlice(batch).Value(&task.slice));
-    ARROW_RETURN_NOT_OK(task.Init(exec_context->memory_pool()));
+    ARROW_RETURN_NOT_OK(task.Init(this));
     ARROW_RETURN_NOT_OK(Throttle());
     LOG(INFO) << "spawn a job, batch " << batch;
     ARROW_RETURN_NOT_OK(exec_context->executor()->Spawn(
@@ -291,6 +330,8 @@ void CmdOps<CmdPartition>::BindOptions(po::options_description& description,
   description.add_options()
       ("seed,s",
        po::value(&options.hash_seed)->default_value(424242))
+      ("key-column,c",
+       po::value(&options.key_column)->default_value("pn_bits"))
       ("partitions,n",
        po::value(&options.num_partitions)->default_value(64))
       ("output-template,o",

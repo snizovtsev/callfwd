@@ -23,6 +23,7 @@ cc_binary(
     ],
     linkopts = ["-lsystemd"],
     deps = [
+        "//third_party/arrow:arrow",
         "//osips_parser:osips_parser",
         "//third_party/proxygen:proxygen",
     ],

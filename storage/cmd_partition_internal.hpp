@@ -13,21 +13,22 @@ struct DataPartition {
   std::mutex mutex;
   int64_t num_rows = 0;
   std::string file_path;
+  std::shared_ptr<arrow::Schema> schema;
   std::shared_ptr<arrow::KeyValueMetadata> metadata;
   std::shared_ptr<arrow::io::FileOutputStream> ostream;
   std::shared_ptr<arrow::ipc::RecordBatchWriter> writer;
 };
 
 struct PartitionTask {
-  arrow::Status Init(arrow::MemoryPool* memory_pool);
+  arrow::Status Init(const struct CmdPartitionPriv* cmd);
+  arrow::Status HashKeys();
   arrow::Status RunColumn(int c);
   arrow::Result<arrow::RecordBatchVector> Run();
   arrow::Result<arrow::RecordBatchVector> operator()() { return Run(); }
 
   const struct CmdPartitionOptions* options;
   arrow::RecordBatchVector slice; // a slice of P batches
-  std::vector<std::shared_ptr<arrow::Array>> key_column;
-  std::vector<std::unique_ptr<arrow::RecordBatchBuilder>> partition;
+  std::vector<std::unique_ptr<arrow::RecordBatchBuilder>> output;
 };
 
 struct CmdPartitionPriv {

@@ -14,6 +14,7 @@
 struct CmdPartitionOptions {
   uint64_t hash_seed;
   uint32_t num_partitions;
+  std::string key_column;
   std::string source_path;
   std::string output_template;
 };

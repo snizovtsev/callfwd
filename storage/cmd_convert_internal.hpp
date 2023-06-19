@@ -8,8 +8,8 @@
 #include <arrow/io/api.h>
 #include <arrow/ipc/api.h>
 
-#include <memory>
 #include <map>
+#include <memory>
 #include <cstdint>
 
 /*

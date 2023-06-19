@@ -9,8 +9,6 @@ cc_binary(
     srcs = [
         "bit_magic.hpp",
         "builder.cpp",
-        "compute_kernels.cpp",
-        "compute_kernels.hpp",
         "csv_reader.cpp",
         "csv_reader.hpp",
         "csv_records.hpp",
@@ -23,6 +21,9 @@ cc_binary(
         "cmd_partition.cpp",
         "cmd_partition.hpp",
         "cmd_partition_internal.hpp",
+        "cmd_pthash.cpp",
+        "cmd_pthash.hpp",
+        "cmd_pthash_internal.hpp",
     ],
     deps = [
         "//third_party/arrow:arrow",

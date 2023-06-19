@@ -2,16 +2,14 @@
 #define CALLFWD_PHONEMAPPING_H
 
 #include <cstdint>
+#include <cstddef>
 #include <memory>
 #include <limits>
-#include <cstddef>
 #include <atomic>
 #include <istream>
 
 #include <folly/Range.h>
 #include <folly/synchronization/HazptrHolder.h>
-
-namespace folly { struct dynamic; }
 
 class PhoneNumber {
 public:
@@ -20,91 +18,73 @@ public:
   static uint64_t fromString(folly::StringPiece s);
 };
 
-class PhoneMapping {
+class Dataset; /* opaque */
+
+class DatasetLoader {
+  /** Scan the directory, mmap files and do a sanity checks. */
+  static std::unique_ptr<Dataset> Open(const char *path);
+
+  /** Lock memory and commit pointer to a global. */
+  void Commit(std::atomic<Dataset*> &global);
+
+  /** Underlying structure. */
+  std::unique_ptr<Dataset> dataset;
+};
+
+struct PnResult {
+  int64_t pn;
+  int64_t pn_handle;
+  int64_t rn;
+  int64_t rn_handle;
+  int64_t xtra_handle;
+  int32_t dno;
+  bool    dnc;
+};
+
+ststruct RnSetResult {
+  std::vector<uint64_t> pn_set;
+  int64_t rn_handle; // ordered jump list
+};
+
+class QueryEngine {
  public:
-  class Data; /* opaque */
-  class Cursor; /* opaque */
-
-  class Builder {
-  public:
-    Builder();
-    ~Builder() noexcept;
-
-    /** Attach arbitrary metadata. */
-    void setMetadata(const folly::dynamic &meta);
-
-    /** Preallocate memory for expected number of records. */
-    void sizeHint(size_t numRecords);
-
-    /** Add a new row into the scratch buffer.
-      * Throws `runtime_error` if key already exists. */
-    Builder& addRow(uint64_t pn, uint64_t rn);
-
-    /** Add many rows from CSV text stream. */
-    void fromCSV(std::istream &in, size_t& line, size_t limit);
-
-    /** Build indexes and release the data. */
-    PhoneMapping build();
-
-    /** Build indexes and commit data to global. */
-    void commit(std::atomic<Data*> &global);
-  private:
-    std::unique_ptr<Data> data_;
-  };
-
   /** Construct taking ownership of Data. Used for tests. */
-  PhoneMapping(std::unique_ptr<Data> data);
+  QueryEngine(std::unique_ptr<Dataset> dataset);
   /** Construct from globals and hold protected reference. */
-  PhoneMapping(std::atomic<Data*> &global);
+  QueryEngine(std::atomic<Dataset*> &global);
   /** Ensure move constructor exists */
-  PhoneMapping(PhoneMapping&& rhs) noexcept;
-  /** Get default US instance from global variable. */
-  static PhoneMapping getUS() noexcept;
-  /** Get default CA instance from global variable. */
-  static PhoneMapping getCA() noexcept;
-  /** Check if DB fully loaded into memory. */
-  static bool isAvailable() noexcept;
-  ~PhoneMapping() noexcept;
+  QueryEngine(QueryEngine&& rhs) noexcept;
+  /** Default destructor. */
+  ~QueryEngine() noexcept;
+  /** Get default instance from global variable. */
+  static QueryEngine Get() noexcept;
+  /** Check if database is loaded. */
+  static bool IsAvailable() noexcept;
+  /** Log metadata to system journal. */
+  void LogMetadata();
 
-  /** Get total number of records */
-  size_t size() const noexcept;
-
-  /** Log metadata to system journal */
-  void printMetadata();
+  int64_t num_pn_rows() const noexcept;
+  int64_t num_rn_rows() const noexcept;
+  int64_t num_xtra_rows() const noexcept;
 
   /** Get a routing number from portability number.
     * If key wasn't found returns NONE. */
-  uint64_t getRN(uint64_t pn) const;
+  //uint64_t getRN(uint64_t pn) const;
+  void QueryPN(uint64_t pn, PnResult &row) const;
 
   /** Get a routing number for a batch of keys.
-    * Faster than calling getRN() multiple times. */
-  void getRNs(size_t N, const uint64_t *pn, uint64_t *rn) const;
+    * Faster than calling queryRN() multiple times. */
+  //void getRNs(size_t N, const uint64_t *pn, uint64_t *rn) const;
+  void QueryPNs(size_t N, const uint64_t *pn, PnResult *rows) const;
 
   /** Select rows by routing number prefix.
     * Use cursor methods to retrieve relevent rows. */
-  PhoneMapping& inverseRNs(uint64_t fromRN, uint64_t toRN) &;
-  PhoneMapping&& inverseRNs(uint64_t fromRN, uint64_t toRN) &&;
-
-  /** Select all rows. Use cursor methods to retrieve relevent rows.*/
-  PhoneMapping& visitRows() &;
-  PhoneMapping&& visitRows() &&;
-
-  /** Has cursor point to some row? */
-  bool hasRow() const noexcept;
-
-  /** Retrieve portability number from the current row. */
-  uint64_t currentPN() const noexcept;
-
-  /** Retrieve routing number from the current row. */
-  uint64_t currentRN() const noexcept;
-
-  /** Move to next row. */
-  PhoneMapping& advance() noexcept;
+  //bool queryRNSet(uint64_t rn_handle, PnSetResult &row);
+  // XXX: postpone second stage
 
  private:
   folly::hazptr_holder<> holder_;
-  const Data *data_;
-  std::unique_ptr<Cursor> cursor_;
+  const Dataset *data_;
 };
 
 #endif // CALLFWD_PHONEMAPPING_H
