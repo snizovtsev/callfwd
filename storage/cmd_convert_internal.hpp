@@ -24,6 +24,7 @@ struct RegularTableWriter {
                       arrow::MemoryPool* memory_pool,
                       int64_t rows_per_batch);
   arrow::Status Advance();
+  arrow::Status Flush();
   arrow::Status Finish();
 
   int64_t rows_per_batch() const {

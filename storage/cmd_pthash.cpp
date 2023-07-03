@@ -1,3 +1,4 @@
+#include "cmd_convert_internal.hpp"
 #include "cmd_pthash_internal.hpp"
 #include "cmd_pthash.hpp"
 #include "lrn_schema.hpp"
@@ -5,6 +6,8 @@
 #include <arrow/io/api.h>
 #include <arrow/compute/api.h>
 #include <arrow/util/bit_util.h>
+#include <arrow/util/checked_cast.h>
+#include <arrow/visit_type_inline.h>
 #include <arrow/stl_iterator.h>
 #include <cstdint>
 #include <folly/Conv.h>
@@ -50,9 +53,11 @@ Status CmdPtHash::Init(const Options& options_) {
 
   int64_t num_rows = table->num_rows();
   table_size = table->num_rows() / options->tweak_alpha;
+  M_table_size = fastmod_computeM_u64(table_size);
   num_buckets = std::ceil(options->tweak_c * num_rows / std::log2(num_rows));
   bucketer = SkewBucketer{num_buckets};
   hash_seed = folly::to<uint64_t>(metadata->Get("hash_seed").ValueOr("absent"));
+  rows_per_batch = folly::to<uint64_t>(metadata->Get("rows_per_batch").ValueOr("absent"));
 
   return Status::OK();
 }
@@ -97,7 +102,7 @@ Status CmdPtHashPriv::SortBuckets(const uint8_t* load_factor) {
     }
   }
 
-  return bins_builder.Finish(&buckets);
+  return bins_builder.Finish(&bucket_bins);
 }
 
 Status CmdPtHashPriv::GroupHashes(const arrow::ListArray& buckets) {
@@ -112,9 +117,10 @@ Status CmdPtHashPriv::GroupHashes(const arrow::ListArray& buckets) {
   ARROW_RETURN_NOT_OK(hash_builder.Append(num_keys,  0));
   ARROW_RETURN_NOT_OK(offset_builder.Append(num_buckets,  0));
 
-  int32_t *offset = offset_builder.mutable_data();
-
+  uint64_t *hash_data = hash_builder.mutable_data();
+  int32_t *offset_data = offset_builder.mutable_data();
   int32_t key_index = 0;
+
   for (int64_t freq = 1; freq <= buckets.length(); ++freq) {
     const auto& bin = dynamic_cast<arrow::UInt32Array&>(
         *buckets.value_slice(freq - 1));
@@ -122,43 +128,34 @@ Status CmdPtHashPriv::GroupHashes(const arrow::ListArray& buckets) {
     for (int64_t j = 0; j < bin.length(); ++j) {
       const uint32_t bucket = bin.Value(j);
       key_index += freq;
-      offset[bucket] = key_index;
+      offset_data[bucket] = key_index;
     }
   }
   CHECK_EQ(key_index, num_keys);
 
-  ARROW_RETURN_NOT_OK(origin.Append(num_keys, 0));
-  uint32_t *origin_data = origin.mutable_data();
-  uint64_t *hash_data = hash_builder.mutable_data();
-
-  key_index = 0;
   for (int chunk = 0; chunk < num_chunks; ++chunk) {
     const auto& bucket_hash = dynamic_cast<arrow::UInt64Array&>(
         *hash1_column->chunk(chunk));
     const auto& table_hash = dynamic_cast<arrow::UInt64Array&>(
         *hash2_column->chunk(chunk));
+
     const int64_t chunk_rows = bucket_hash.length();
     CHECK_EQ(table_hash.length(), bucket_hash.length());
 
     for (int64_t i = 0; i < chunk_rows; ++i) {
       const uint32_t bucket = bucketer(bucket_hash.Value(i));
-      const int32_t pos = --offset[bucket];
+      const int32_t pos = --offset_data[bucket];
       DCHECK_GE(pos, 0);
       hash_data[pos] = table_hash.Value(i);
-      origin_data[pos] = key_index + i;
     }
-    key_index += chunk_rows;
   }
-  CHECK_EQ(key_index, num_keys);
 
   uint32_t hash_bin = 0;
   key_index = 0;
   for (int64_t freq = 1; freq <= buckets.length(); ++freq) {
-    const auto& bin = dynamic_cast<arrow::UInt32Array&>(
-        *buckets.value_slice(freq - 1));
-
-    for (int64_t j = bin.length(); j > 0; --j) {
-      offset[hash_bin++] = key_index;
+    int64_t rep = buckets.value_length(freq - 1);
+    for (; rep; --rep) {
+      offset_data[hash_bin++] = key_index;
       key_index += freq;
     }
   }
@@ -171,48 +168,51 @@ Status CmdPtHashPriv::GroupHashes(const arrow::ListArray& buckets) {
     ::FromArrays(arrow::Int32Array(hash_bin, std::move(offset_buffer)),
                  arrow::UInt64Array(num_keys, std::move(hash_buffer)),
                  memory_pool)
-    .Value(&hashes);
+    .Value(&hash_bins);
 }
 
-Status CmdPtHashPriv::SelectPilots(const arrow::ListArray& hash_bins) {
-  uint32_t oldreport = table->num_rows();
+Status CmdPtHashPriv::SelectPilots(const arrow::ListArray& bucket_bins,
+                                   const arrow::ListArray& hash_bins)
+{
   uint64_t pilot_max = 0;
-
   uint32_t pilot_limit = UINT16_MAX - 10;
-  std::vector<uint64_t> hashed_pilot(pilot_limit);
+  uint32_t oldreport = table->num_rows();
+
+  arrow::TypedBufferBuilder<bool> taken(memory_pool);
+  arrow::TypedBufferBuilder<uint16_t> pilot_builder(memory_pool);
+  std::vector<uint32_t> positions(bucket_bins.length());
+
+  hashed_pilot.resize(pilot_limit);
   for (uint32_t p = 0; p < pilot_limit; ++p)
     hashed_pilot[p] = murmur3_64(p, hash_seed);
 
-  const uint32_t* bucket_desc_data = buckets->values()->data()->GetValues<uint32_t>(1);
-  const uint64_t* hash_data = hash_bins.values()->data()->GetValues<uint64_t>(1);
-  uint32_t* origin_data = origin.mutable_data();
+  const auto& ordered_buckets = dynamic_cast<arrow::UInt32Array&>(
+      *bucket_bins.values());
+  const auto& hash_values = dynamic_cast<arrow::UInt64Array&>(
+      *hash_bins.values());
 
-  ARROW_RETURN_NOT_OK(take_indices.Append(table_size, 0));
-  uint32_t *indices_data = take_indices.mutable_data();
-
-  taken.Reset();
   ARROW_RETURN_NOT_OK(taken.Append(table_size, false));
   uint8_t *taken_bits = taken.mutable_data();
 
-  ARROW_RETURN_NOT_OK(pilot.Append(num_buckets, 0));
-  uint16_t *pilot_data = pilot.mutable_data();
+  ARROW_RETURN_NOT_OK(pilot_builder.Append(num_buckets, 0));
+  uint16_t *pilot_data = pilot_builder.mutable_data();
 
-  __uint128_t M = fastmod_computeM_u64(table_size);
   for (int64_t bi = hash_bins.length(); bi > 0; --bi) {
-    uint32_t lb = bucket_desc_data[bi];
+    uint32_t bucket = ordered_buckets.Value(bi);
     int64_t row_start = hash_bins.value_offset(bi - 1);
     int64_t row_end = hash_bins.value_offset(bi);
     int64_t row_idx = row_end - 1;
     bool retry = true;
 
     for (uint32_t trial = 0; retry && trial < pilot_limit; ++trial) {
+      positions.clear();
+
       for (retry = false; row_idx >= row_start; --row_idx) {
-        uint64_t h = hash_data[row_idx] ^ hashed_pilot[trial];
-        uint32_t p = fastmod_u64(h, M, table_size);
+        uint64_t h = hash_values.Value(row_idx) ^ hashed_pilot[trial];
+        uint32_t p = fastmod_u64(h, M_table_size, table_size);
         if (!bit_util::GetBit(taken_bits, p)) {
-          indices_data[p] = origin_data[row_idx];
           bit_util::SetBit(taken_bits, p);
-          origin_data[row_idx] = p;
+          positions.push_back(p);
         } else {
           retry = true;
           break;
@@ -220,15 +220,11 @@ Status CmdPtHashPriv::SelectPilots(const arrow::ListArray& hash_bins) {
       }
 
       if (retry) {
-        for (row_idx += 1; row_idx < row_end; ++row_idx) {
-          uint32_t p = origin_data[row_idx];
-          origin_data[row_idx] = indices_data[p];
-          indices_data[p] = 0;
+        for (uint32_t p : positions)
           bit_util::ClearBit(taken_bits, p);
-        }
-        --row_idx;
+        row_idx = row_end - 1;
       } else {
-        pilot_data[lb] = trial;
+        pilot_data[bucket] = trial;
         if (trial > pilot_max)
           pilot_max = trial;
       }
@@ -237,7 +233,7 @@ Status CmdPtHashPriv::SelectPilots(const arrow::ListArray& hash_bins) {
     CHECK(!retry);
 
     if (oldreport - row_idx > table->num_rows() / 100) {
-      LOG(INFO) << lb << ": " << pilot_data[lb]
+      LOG(INFO) << bucket << ": " << pilot_data[bucket]
                 << " maxp " << pilot_max
                 << " bs " << row_end - row_start
                 << " off " << row_start;
@@ -256,104 +252,201 @@ Status CmdPtHashPriv::SelectPilots(const arrow::ListArray& hash_bins) {
   }
   std::cout << "..." << std::endl;
 
+  ARROW_ASSIGN_OR_RAISE(auto pilot_buf, pilot_builder.Finish());
+  pilot_array = std::make_shared<arrow::UInt16Array>(
+      num_buckets, std::move(pilot_buf));
   return Status::OK();
 }
 
-Status CmdPtHash::Run(int64_t limit) {
-  /*
-   * in: bucketer
-   * in: hash1
-   * out: bucket_size
-   */
-  LOG(INFO) << "Sizing buckets...";
-  auto hash1_column = table->GetColumnByName("hash1");
-  ARROW_ASSIGN_OR_RAISE(
-    auto load_factor, BucketHistrogram(hash1_column->chunks()));
+Status CmdPtHashPriv::MakeIndices(const arrow::ArrayVector& bucket_hash_chunks,
+                                  const arrow::ArrayVector& table_hash_chunks)
+{
+  arrow::UInt32Builder indices_builder(memory_pool);
+  ARROW_RETURN_NOT_OK(indices_builder.AppendEmptyValues(table_size));
 
-  /*
-   * in: bucket_size
-   * out: buckets
-   */
+  const size_t num_chunks = bucket_hash_chunks.size();
+  CHECK_EQ(num_chunks, table_hash_chunks.size());
+
+  chunk_bits = 0;
+  for (const auto& chunk : bucket_hash_chunks) {
+    const int64_t max_index = chunk->length() - 1;
+    chunk_bits = std::max(bit_util::NumRequiredBits(max_index),
+                          chunk_bits);
+  }
+
+  if (chunk_bits + bit_util::NumRequiredBits(num_chunks) > 32)
+    return Status::Invalid("Cannot pack row coordinates into 32 bits");
+
+  for (size_t c = 0; c < num_chunks; ++c) {
+    const auto& bucket_hash = dynamic_cast<arrow::UInt64Array&>(
+        *bucket_hash_chunks[c]);
+    const auto& table_hash = dynamic_cast<arrow::UInt64Array&>(
+        *table_hash_chunks[c]);
+    const int64_t chunk_rows = bucket_hash.length();
+    CHECK_EQ(table_hash.length(), bucket_hash.length());
+    const uint32_t index_high = (c + 1) << chunk_bits;
+
+    for (int64_t r = 0; r < chunk_rows; ++r) {
+      const uint32_t bucket = bucketer(bucket_hash.Value(r));
+      const auto pilot = pilot_array->Value(bucket);
+      const uint64_t h = table_hash.Value(r) ^ hashed_pilot[pilot];
+      const uint32_t p = fastmod_u64(h, M_table_size, table_size);
+      indices_builder[p] = r | index_high;
+    }
+  }
+
+  return indices_builder.Finish(&indices);
+}
+
+Status CmdPtHash::Run(int64_t limit) {
+  auto& hash1_chunks = table->GetColumnByName("hash1")->chunks();
+  auto& hash2_chunks = table->GetColumnByName("hash2")->chunks();
+
+  LOG(INFO) << "Sizing buckets...";
+  ARROW_ASSIGN_OR_RAISE(
+      auto load_factor, BucketHistrogram(hash1_chunks));
+
   LOG(INFO) << "Sorting buckets...";
-  ARROW_RETURN_NOT_OK(SortBuckets(std::move(load_factor).raw_values()));
+  ARROW_RETURN_NOT_OK(
+      SortBuckets(std::move(load_factor).raw_values()));
 
   LOG(INFO) << "Group hashes...";
-  ARROW_RETURN_NOT_OK(GroupHashes(*buckets));
+  ARROW_RETURN_NOT_OK(
+      GroupHashes(*bucket_bins));
 
   LOG(INFO) << "Select pilots...";
-  ARROW_RETURN_NOT_OK(SelectPilots(*hashes));
+  ARROW_RETURN_NOT_OK(
+      SelectPilots(*std::move(bucket_bins),
+                   *std::move(hash_bins)));
 
-#if 0
-  auto indices = arrow::UInt32Array(
-    table_size,
-    take_indices.FinishWithLength(table_size).ValueOrDie(),
-    taken.Finish().ValueOrDie());
-  std::cout << indices.ToString() << std::endl;
+  LOG(INFO) << "Make indices...";
+  ARROW_RETURN_NOT_OK(
+      MakeIndices(hash1_chunks, hash2_chunks));
 
-  LOG(INFO) << "Take...";
+  return Status::OK();
+}
+
+Status CmdPtHashPriv::WritePtHash() {
+  auto table = arrow::Table::Make(
+    arrow::schema({arrow::field("pthash_pilot", pilot_array->type())}),
+    {pilot_array});
+
+  ARROW_ASSIGN_OR_RAISE(auto ostream, arrow::io::FileOutputStream
+                        ::Open(options->index_output_path));
+
+  ARROW_ASSIGN_OR_RAISE(auto writer, arrow::ipc::MakeFileWriter(
+      ostream.get(), table->schema(),
+      arrow::ipc::IpcWriteOptions{
+        .memory_pool = memory_pool,
+      }, metadata));
+
+  ARROW_RETURN_NOT_OK(writer->WriteTable(*table));
+  return writer->Close();
+}
+
+struct TakeAC {
+  template <class T>
+  static constexpr bool is_simple_type =
+    arrow::has_c_type<T>::value ||
+    arrow::is_decimal_type<T>::value ||
+    arrow::is_fixed_size_binary_type<T>::value;
+
+  template <typename data_t, typename indices_t>
+  std::enable_if_t<is_simple_type<data_t>, Status>
+  Visit(const data_t& type, const indices_t* indices, int64_t length) {
+    using BuilderType = typename arrow::TypeTraits<data_t>::BuilderType;
+    using ArrayType = typename arrow::TypeTraits<data_t>::ArrayType;
+    auto builder = static_cast<BuilderType*>(target);
+    const indices_t row_mask = (1 << chunk_bits) - 1;
+
+    ARROW_RETURN_NOT_OK(builder->Reserve(length));
+
+    for (int64_t i = 0; i < length; ++i) {
+      const int chunk_index = indices[i] >> chunk_bits;
+      const int64_t row_index = indices[i] & row_mask;
+
+      if (LIKELY(chunk_index)) {
+        const auto& chunk = static_cast<ArrayType&>(
+            *source->chunk(chunk_index - 1));
+        builder->UnsafeAppend(chunk.GetView(row_index));
+      } else {
+        ARROW_RETURN_NOT_OK(builder->AppendEmptyValue());
+      }
+    }
+
+    return Status::OK();
+  }
+
+  template <typename data_t, typename indices_t>
+  std::enable_if_t<!is_simple_type<data_t>, Status>
+  Visit(const data_t& type, const indices_t* indices, int64_t length) {
+    return Status::NotImplemented("not a simple type");
+  }
+
+  const arrow::ChunkedArray* source;
+  arrow::ArrayBuilder* target;
+  int chunk_bits;
+};
+
+static Result<std::shared_ptr<arrow::Table>>
+ExcludeHashColumns(const arrow::Table& table) {
   std::vector<int> select_columns;
-  select_columns.reserve(table->num_columns() - 2);
-  for (int c = 0; c < table->num_columns(); ++c) {
-    const std::string& name = table->field(c)->name();
+
+  select_columns.reserve(table.num_columns() - 2);
+  for (int c = 0; c < table.num_columns(); ++c) {
+    const std::string& name = table.field(c)->name();
     if (name != "hash1" && name != "hash2")
       select_columns.push_back(c);
   }
+
+  return table.SelectColumns(select_columns);
+}
+
+Status CmdPtHashPriv::WriteData() {
+  RegularTableWriter writer;
+
+  LOG(INFO) << "Take...";
+
   ARROW_ASSIGN_OR_RAISE(
-      auto table_without_hash, table->SelectColumns(select_columns));
+      auto table_without_hash, ExcludeHashColumns(*table));
 
-  res = arrow::compute::Take(table, indices)->table();
-  std::cout << res->ToString();
+  ARROW_RETURN_NOT_OK(
+      writer.Reset(table_without_hash->schema(),
+                   options->data_output_path,
+                   memory_pool, rows_per_batch));
 
-  LOG(INFO) << "Verify...";
-  table_index = 0;
-  for (auto& chunk : res->GetColumnByName("pn_bits")->chunks()) {
-    auto pn_bits = chunk->data()->GetValues<uint8_t>(0, 0);
-    auto pn_data = chunk->data()->GetValues<uint64_t>(1, 0);
-    for (int64_t i = 0; i < chunk->length(); ++i, ++table_index) {
-      if (UNLIKELY(!bit_util::GetBit(pn_bits, i)))
-        continue;
-      uint64_t pn = pn_data[i] >> LRN_BITS_PN_SHIFT;
-      auto h = murmur3_128(pn, hash_seed);
-      uint32_t b = bucketer(h.first);
-      uint64_t th = h.second ^ hashed_pilot[pilot_data[b]];
-      uint32_t p = fastmod_u64(th, M, table_size);
-      LOG_IF(ERROR, p != table_index) << table_index << ": pn=" << pn << " " << p;
+  const uint32_t* ind = indices->raw_values();
+  const uint32_t* end = indices->raw_values() + indices->length();
+
+  for (; ind < end; ind += writer.rows_per_batch()) {
+    int64_t length = writer.rows_per_batch();
+
+    if (ind + length > end)
+      length = end - ind;
+
+    for (int c = 0; c < table_without_hash->num_columns(); ++c) {
+      auto column = table_without_hash->column(c);
+      TakeAC take;
+      take.source = column.get();
+      take.chunk_bits = chunk_bits;
+      take.target = writer.builder->GetField(c);
+      ARROW_RETURN_NOT_OK(
+          arrow::VisitTypeInline(*column->type(), &take, ind, length));
     }
+
+    ARROW_RETURN_NOT_OK(writer.Flush());
   }
-#endif
+
+  ARROW_RETURN_NOT_OK(writer.Finish());
 
   return Status::OK();
 }
 
 Status CmdPtHash::Finish(bool incomplete) {
-#if 0
-  ARROW_ASSIGN_OR_RAISE(auto pthash_buf, pilot.FinishWithLength(num_buckets));
-  auto pthash = std::make_shared<arrow::UInt16Array>(num_buckets, pthash_buf);
-  LOG(INFO) << "pilot bytes: " << pthash_buf->size() << " ("
-    << num_buckets << " buckets)";
-  LOG(INFO) << pthash->ToString();
-
-  auto pthash_table = arrow::Table::Make(
-    arrow::schema({arrow::field("pilot", pthash->type())}), {pthash});
-
-  ARROW_ASSIGN_OR_RAISE(auto ostream, arrow::io::FileOutputStream::Open(
-      options->data_output_path));
-  ARROW_ASSIGN_OR_RAISE(auto writer, arrow::ipc::MakeFileWriter(
-      ostream.get(), res->schema(),
-      arrow::ipc::IpcWriteOptions{},
-      metadata));
-  ARROW_RETURN_NOT_OK(writer->WriteTable(*res));
-  ARROW_RETURN_NOT_OK(writer->Close());
-
-  ARROW_ASSIGN_OR_RAISE(auto ostream_index, arrow::io::FileOutputStream
-                        ::Open(options->data_output_path));
-  ARROW_ASSIGN_OR_RAISE(auto writer_index, arrow::ipc::MakeFileWriter(
-      ostream_index.get(), pthash_table->schema(),
-      arrow::ipc::IpcWriteOptions{}));
-  ARROW_RETURN_NOT_OK(writer_index->WriteTable(*pthash_table));
-  ARROW_RETURN_NOT_OK(writer_index->Close());
-#endif
-
+  LOG(INFO) << "Writing...";
+  ARROW_RETURN_NOT_OK(WritePtHash());
+  if (!incomplete)
+    ARROW_RETURN_NOT_OK(WriteData());
   return Status::OK();
 }
 

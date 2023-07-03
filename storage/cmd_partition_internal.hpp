@@ -9,7 +9,7 @@
 #include <condition_variable>
 #include <memory>
 
-struct DataPartition {
+struct PartitionSink {
   std::mutex mutex;
   int64_t num_rows = 0;
   std::string file_path;
@@ -43,7 +43,7 @@ struct CmdPartitionPriv {
 
   std::shared_ptr<arrow::io::MemoryMappedFile> source_file;
   std::shared_ptr<arrow::ipc::RecordBatchFileReader> batch_reader;
-  std::vector<DataPartition> output;
+  std::vector<PartitionSink> output;
 
   mutable std::mutex scheduler_mutex;
   mutable std::condition_variable producer_cv;

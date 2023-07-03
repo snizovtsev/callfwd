@@ -134,7 +134,8 @@ arrow::Status Metadata(const po::variables_map& options,
 
   std::cout << "#batches: " << reader->num_record_batches() << "\n\n";
   std::cout << reader->schema()->ToString() << std::endl;
-  std::cout << reader->metadata()->ToString() << std::endl;
+  if (auto metadata = reader->metadata())
+    std::cout << metadata->ToString() << std::endl;
   return arrow::Status::OK();
 }
 

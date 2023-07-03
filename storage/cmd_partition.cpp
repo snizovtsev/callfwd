@@ -174,17 +174,19 @@ Status CmdPartition::Init(const Options& options_) {
   auto output_fields = batch_reader->schema()->fields();
   output_fields.push_back(arrow::field("hash1", arrow::uint64()));
   output_fields.push_back(arrow::field("hash2", arrow::uint64()));
+
   auto output_schema = arrow::schema(std::move(output_fields),
                                      batch_reader->schema()->metadata());
+  auto output_metadata = batch_reader->metadata()->Copy();
 
   arrow::ipc::IpcWriteOptions write_opts;
   write_opts.memory_pool = exec_context->memory_pool();
-  output = std::vector<DataPartition>(options->num_partitions);
+  output = std::vector<PartitionSink>(options->num_partitions);
 
   for (uint32_t p = 0; p < options->num_partitions; ++p) {
-    DataPartition &part = output[p];
+    auto &part = output[p];
     part.schema = output_schema;
-    part.metadata = std::make_shared<arrow::KeyValueMetadata>();
+    part.metadata = output_metadata->Copy();
     part.file_path = fmt::format(options->output_template, p);
     ARROW_ASSIGN_OR_RAISE(part.ostream, arrow::io::FileOutputStream::Open(
         part.file_path));
@@ -299,15 +301,15 @@ Status CmdPartition::Finish(bool incomplete) {
 
   LOG(INFO) << "Finalize partitions...";
   for (size_t p = 0; p < output.size(); ++p) {
-    auto& part = output[p];
+    auto& metadata = *output[p].metadata;
     // TODO: substrait key expression
-    part.metadata->Append("num_partitions", std::to_string(options->num_partitions));
-    part.metadata->Append("num_rows", std::to_string(part.num_rows));
-    part.metadata->Append("partition", std::to_string(p));
-    part.metadata->Append("hash_type", "murmur3");
-    part.metadata->Append("hash_seed", std::to_string(options->hash_seed));
-    part.metadata->Append("incomplete", std::to_string(incomplete));
-    ARROW_RETURN_NOT_OK(part.writer->Close());
+    metadata.Append("num_partitions", std::to_string(options->num_partitions));
+    metadata.Append("num_rows", std::to_string(output[p].num_rows));
+    metadata.Append("partition", std::to_string(p));
+    metadata.Append("hash_type", "murmur3");
+    metadata.Append("hash_seed", std::to_string(options->hash_seed));
+    metadata.Append("incomplete", std::to_string(incomplete));
+    ARROW_RETURN_NOT_OK(output[p].writer->Close());
   }
 
   std::unique_lock<std::mutex> lk(scheduler_mutex);

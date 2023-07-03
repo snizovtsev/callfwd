@@ -178,6 +178,10 @@ Status RegularTableWriter::Advance() {
   if (ARROW_PREDICT_TRUE(column->capacity() > column->length()))
     return arrow::Status::OK();
 
+  return Flush();
+}
+
+Status RegularTableWriter::Flush() {
   ARROW_ASSIGN_OR_RAISE(auto batch, builder->Flush());
   ARROW_RETURN_NOT_OK(writer->WriteRecordBatch(*batch));
 
@@ -191,7 +195,7 @@ Status RegularTableWriter::Advance() {
     LOG(INFO) << file_path << " layout: "
               << header_bytes << " byte header "
               << record_bytes << " byte "
-              << column->capacity() << " row records";
+              << builder->GetField(0)->capacity() << " row records";
   }
 
   static constexpr int64_t k100mb = 100 * (1 << 20);
